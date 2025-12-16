@@ -1,0 +1,12 @@
+<PAMDataset>
+  <PAMRasterBand band="1">
+    <Description>Accumulated Flash Area</Description>
+    <Metadata>
+      <MDI key="STATISTICS_MINIMUM">1</MDI>
+      <MDI key="STATISTICS_MAXIMUM">24</MDI>
+      <MDI key="STATISTICS_MEAN">1.1662458532989</MDI>
+      <MDI key="STATISTICS_STDDEV">0.8531168249414</MDI>
+      <MDI key="STATISTICS_VALID_PERCENT">0.3504</MDI>
+    </Metadata>
+  </PAMRasterBand>
+</PAMDataset>
