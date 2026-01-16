@@ -1,37 +1,70 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useMemo } from 'react';
 import { Platform, StyleSheet, View, Text, TouchableOpacity, ScrollView } from 'react-native';
-import 'leaflet/dist/leaflet.css';
+import 'maplibre-gl/dist/maplibre-gl.css';
+import * as GeoTIFF from 'geotiff';
 
-const pngFiles = [
-  '20250725180000_lightning_0001.png',
-  '20250725181000_lightning_0001.png',
-  '20250725182000_lightning_0001.png',
-  '20250725183000_lightning_0001.png',
-  '20250725184000_lightning_0001.png',
-  '20250725185000_lightning_0001.png',
-  '20250725190000_lightning_0001.png',
-  '20250725191000_lightning_0001.png',
-  '20250725192000_lightning_0001.png',
-  '20250725193000_lightning_0001.png',
-  '20250725194000_lightning_0001.png',
-  '20250725195000_lightning_0001.png',
-  '20250725200000_lightning_0001.png',
-  '20250725201000_lightning_0001.png',
-  '20250725202000_lightning_0001.png',
-  '20250725203000_lightning_0001.png',
-  '20250725204000_lightning_0001.png',
-  '20250725205000_lightning_0001.png',
-  '20250725210000_lightning_0001.png',
-  '20250725211000_lightning_0001.png',
-  '20250725212000_lightning_0001.png',
-  '20250725213000_lightning_0001.png'
+// --- Configuration ---
+const REGION = {
+  west: -10.0,
+  north: 65.0,
+  east: 33.0,
+  south: 33.0,
+};
+
+const LATEST_DATE_STR = "202601160050"; // YYYYMMDDHHmm
+const TIMESTEP_COUNT = 18;
+const INTERVAL_MINUTES = 10;
+
+const CHANNELS = [
+  { id: 'lightning', label: 'Lightning' },
+  { id: 'sat_ch0', label: 'VIS (Ch0)' },
+  { id: 'sat_ch1', label: 'IR (Ch1)' },
 ];
 
-export default function App() {
-  const [selectedImage, setSelectedImage] = useState(pngFiles[pngFiles.length - 1]);
-  const mapRef = useRef(null);
-  const mapInstance = useRef(null);
+const BASE_BUCKET_URL = "https://storage.googleapis.com/inference_result/forecasts";
 
+// --- Helpers ---
+const generateTimesteps = (startDateStr, count, intervalMinutes) => {
+  const year = parseInt(startDateStr.substring(0, 4));
+  const month = parseInt(startDateStr.substring(4, 6)) - 1;
+  const day = parseInt(startDateStr.substring(6, 8));
+  const hour = parseInt(startDateStr.substring(8, 10));
+  const minute = parseInt(startDateStr.substring(10, 12));
+
+  const startTime = new Date(Date.UTC(year, month, day, hour, minute));
+  const steps = [];
+
+  const baseDateFolder = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+
+  for (let i = 0; i < count; i++) {
+    // Forward in time: startTime + i * interval
+    const t = new Date(startTime.getTime() + i * intervalMinutes * 60 * 1000);
+    const y = t.getUTCFullYear();
+    const m = String(t.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(t.getUTCDate()).padStart(2, '0');
+    const h = String(t.getUTCHours()).padStart(2, '0');
+    const min = String(t.getUTCMinutes()).padStart(2, '0');
+    
+    steps.push({
+      dateFolder: baseDateFolder,
+      filenameTime: `${y}${m}${d}${h}${min}`,
+      label: `${h}:${min}`,
+      fullDate: t
+    });
+  }
+  return steps;
+};
+
+const TIMESTEPS = generateTimesteps(LATEST_DATE_STR, TIMESTEP_COUNT, INTERVAL_MINUTES);
+
+export default function App() {
+  const [selectedStep, setSelectedStep] = useState(TIMESTEPS[TIMESTEPS.length - 1]);
+  const [selectedChannel, setSelectedChannel] = useState(CHANNELS[0]);
+  const mapRef = useRef<any>(null);
+  const mapInstance = useRef<any>(null);
+  const [isLoading, setIsLoading] = useState(false);
+
+  // Initialize Map (Web Only)
   useEffect(() => {
     if (Platform.OS === 'web' && mapRef.current) {
       import('maplibre-gl').then(({ Map, NavigationControl }) => {
@@ -57,98 +90,193 @@ export default function App() {
               }
             ]
           },
-          hash: true,
-          center: [0, 15],
-          zoom: 1
+          center: [(REGION.west + REGION.east) / 2, (REGION.north + REGION.south) / 2],
+          zoom: 3
         });
 
         mapInstance.current = map;
         map.addControl(new NavigationControl());
 
-        map.on('load', async () => {
-          await loadImageLayer(map, selectedImage);
+        map.on('load', () => {
+          updateMapLayer();
         });
       });
     }
   }, []);
 
+  // Update layer when selection changes
   useEffect(() => {
-    if (Platform.OS === 'web' && mapInstance.current && mapInstance.current.isStyleLoaded()) {
-      loadImageLayer(mapInstance.current, selectedImage);
+    if (mapInstance.current && mapInstance.current.isStyleLoaded()) {
+      updateMapLayer();
     }
-  }, [selectedImage]);
+  }, [selectedStep, selectedChannel]);
 
-  const loadImageLayer = async (map, filename) => {
+  const updateMapLayer = async () => {
+    if (!mapInstance.current) return;
+    const map = mapInstance.current;
+    
+    setIsLoading(true);
     try {
-      console.log('Loading Image:', filename);
-      
-      // Remove existing layer if present
-      if (map.getLayer('lightning-layer')) {
-        map.removeLayer('lightning-layer');
-      }
-      if (map.getSource('lightning-canvas')) {
-        map.removeSource('lightning-canvas');
-      }
+      const url = `${BASE_BUCKET_URL}/${selectedStep.dateFolder}/forecast_${selectedStep.filenameTime}_${selectedChannel.id}.tiff`;
+      console.log('Fetching:', url);
 
-      // Mercator bounds derived from gdalinfo of the warped files
-      // These are static because all files were warped to the same extent
-      const west = -81.2778265;
-      const north = 77.3564187; // Top
-      const east = 81.2904694;  // Right
-      const south = -77.3690833; // Bottom
-      
+      const dataUrl = await fetchAndProcessTiff(url, selectedChannel.id);
+
       const coordinates = [
-        [west, north], // Top-Left
-        [east, north], // Top-Right
-        [east, south], // Bottom-Right
-        [west, south]  // Bottom-Left
+        [REGION.west, REGION.north], // TL
+        [REGION.east, REGION.north], // TR
+        [REGION.east, REGION.south], // BR
+        [REGION.west, REGION.south]  // BL
       ];
-      
-      map.addSource('lightning-canvas', {
-        type: 'image',
-        url: `/data_tmp/${filename}`, // Serve PNG directly
-        coordinates: coordinates
-      });
 
-      map.addLayer({
-        id: 'lightning-layer',
-        type: 'raster',
-        source: 'lightning-canvas',
-        paint: {
-          'raster-opacity': 1.0,
-          'raster-resampling': 'nearest'
-        }
-      });
-      
+      const sourceId = 'forecast-source';
+      const layerId = 'forecast-layer';
+
+      const source = map.getSource(sourceId);
+      if (source) {
+        source.updateImage({ url: dataUrl, coordinates });
+      } else {
+        map.addSource(sourceId, {
+          type: 'image',
+          url: dataUrl,
+          coordinates: coordinates
+        });
+
+        map.addLayer({
+          id: layerId,
+          type: 'raster',
+          source: sourceId,
+          paint: {
+            'raster-opacity': 0.8,
+            'raster-fade-duration': 0
+          }
+        });
+      }
     } catch (error) {
-      console.error('Error loading image layer:', error);
+      console.error('Error updating layer:', error);
+      // Optional: Show user feedback
+    } finally {
+      setIsLoading(false);
     }
   };
 
-  const switchImage = (img) => setSelectedImage(img);
+  const fetchAndProcessTiff = async (url, channelId) => {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`Failed to fetch TIFF: ${response.statusText}`);
+    
+    const arrayBuffer = await response.arrayBuffer();
+    const tiff = await GeoTIFF.fromArrayBuffer(arrayBuffer);
+    const image = await tiff.getImage();
+    const rasters = await image.readRasters(); // returns list of typed arrays
+    const data: any = rasters[0]; // Assuming single band for these files
+    const width = image.getWidth();
+    const height = image.getHeight();
+
+    // Normalization logic
+    let min = Infinity;
+    let max = -Infinity;
+    for (let i = 0; i < data.length; i++) {
+      if (data[i] < min) min = data[i];
+      if (data[i] > max) max = data[i];
+    }
+    
+    const range = max - min;
+    const rgba = new Uint8ClampedArray(width * height * 4);
+
+    for (let i = 0; i < data.length; i++) {
+      const val = data[i];
+      const normalized = range === 0 ? 0 : (val - min) / range;
+      const pixelVal = Math.floor(normalized * 255);
+      
+      const idx = i * 4;
+      
+      // Color Mapping
+      if (channelId === 'lightning') {
+        // Lightning: Transparent to Yellow/Red
+        if (pixelVal < 5) { // Threshold for transparency
+            rgba[idx] = 0; rgba[idx + 1] = 0; rgba[idx + 2] = 0; rgba[idx + 3] = 0;
+        } else {
+            // Heatmap: Yellow (255, 255, 0) to Red (255, 0, 0)
+            // Normalized 0-1
+            const p = pixelVal / 255;
+            rgba[idx] = 255; // R
+            rgba[idx + 1] = Math.floor(255 * (1 - p)); // G (Decreases as value increases)
+            rgba[idx + 2] = 0; // B
+            rgba[idx + 3] = Math.floor(Math.min(255, pixelVal * 2)); // Alpha (More opaque as value increases)
+        }
+      } else {
+        // Satellite: Grayscale
+        // Invert for IR? Usually IR is inverted (Cold=White), but let's stick to standard first.
+        // If Ch1 is IR, usually lighter = colder (clouds). 
+        // Assuming raw values are scaled such that interesting features are visible.
+        rgba[idx] = pixelVal;
+        rgba[idx + 1] = pixelVal;
+        rgba[idx + 2] = pixelVal;
+        rgba[idx + 3] = 255;
+      }
+    }
+
+    // Create Canvas to convert to Data URL
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Could not get 2d context');
+    
+    const imageData = new ImageData(rgba, width, height);
+    ctx.putImageData(imageData, 0, 0);
+    
+    return canvas.toDataURL();
+  };
 
   return (
     <View style={styles.page}>
       {Platform.OS === 'web' ? (
         <div ref={mapRef} style={styles.map} />
       ) : (
-        <View style={styles.map} />
+        <View style={styles.map}>
+           <Text style={{textAlign:'center', marginTop: 100}}>Map is Web-Only in this prototype</Text>
+        </View>
       )}
       
-      <View style={styles.controls}>
+      {isLoading && (
+        <View style={styles.loader}>
+          <Text style={styles.loaderText}>Loading...</Text>
+        </View>
+      )}
+
+      <View style={styles.controlsContainer}>
+        {/* Channel Selector */}
+        <View style={styles.channelRow}>
+          {CHANNELS.map((ch) => (
+            <TouchableOpacity
+              key={ch.id}
+              onPress={() => setSelectedChannel(ch)}
+              style={[styles.channelBtn, selectedChannel.id === ch.id && styles.selectedBtn]}
+            >
+              <Text style={[styles.btnText, selectedChannel.id === ch.id && styles.selectedBtnText]}>
+                {ch.label}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+
+        {/* Time Slider */}
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
-          style={styles.scroll}
+          style={styles.timeScroll}
           contentContainerStyle={styles.scrollContent}
         >
-          {pngFiles.map((file) => (
+          {TIMESTEPS.map((step) => (
             <TouchableOpacity
-              key={file}
-              onPress={() => switchImage(file)}
-              style={[styles.button, selectedImage === file && styles.selected]}
+              key={step.filenameTime}
+              onPress={() => setSelectedStep(step)}
+              style={[styles.timeBtn, selectedStep.filenameTime === step.filenameTime && styles.selectedBtn]}
             >
-              <Text style={styles.buttonText}>{file.slice(0, 15)}</Text>
+              <Text style={[styles.btnText, selectedStep.filenameTime === step.filenameTime && styles.selectedBtnText]}>
+                {step.label}
+              </Text>
             </TouchableOpacity>
           ))}
         </ScrollView>
@@ -161,41 +289,75 @@ const styles = StyleSheet.create({
   page: {
     flex: 1,
     height: '100vh',
+    backgroundColor: '#f5f5f5'
   },
   map: {
     flex: 1,
     height: '100%',
-    minHeight: '100vh',
     width: '100%',
   },
-  controls: {
+  loader: {
+    position: 'absolute',
+    top: 20,
+    left: '50%',
+    transform: [{ translateX: '-50%' }],
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    padding: 10,
+    borderRadius: 8,
+    zIndex: 2000,
+  },
+  loaderText: {
+    color: 'white',
+    fontWeight: 'bold',
+  },
+  controlsContainer: {
     position: 'absolute',
     bottom: 20,
-    left: 20,
-    right: 20,
+    left: 10,
+    right: 10,
     zIndex: 1000,
+    alignItems: 'center',
   },
-  scroll: {
+  channelRow: {
+    flexDirection: 'row',
+    marginBottom: 10,
+    backgroundColor: 'rgba(255,255,255,0.9)',
+    borderRadius: 25,
+    padding: 4,
+    elevation: 4,
+  },
+  channelBtn: {
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 20,
+  },
+  timeScroll: {
     maxHeight: 50,
+    width: '100%',
   },
   scrollContent: {
     paddingHorizontal: 10,
   },
-  button: {
+  timeBtn: {
     backgroundColor: 'rgba(255,255,255,0.9)',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
     borderRadius: 20,
-    marginRight: 10,
-    borderWidth: 2,
-    borderColor: 'transparent',
+    marginRight: 8,
+    borderWidth: 1,
+    borderColor: '#ddd',
+    elevation: 2,
   },
-  selected: {
+  selectedBtn: {
+    backgroundColor: '#007AFF',
     borderColor: '#007AFF',
-    backgroundColor: 'white',
   },
-  buttonText: {
+  btnText: {
     fontSize: 12,
     fontWeight: '600',
+    color: '#333',
+  },
+  selectedBtnText: {
+    color: 'white',
   },
 });
