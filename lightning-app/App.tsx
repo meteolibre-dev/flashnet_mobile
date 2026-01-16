@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, useMemo } from 'react';
-import { Platform, StyleSheet, View, Text, TouchableOpacity, ScrollView } from 'react-native';
+import { Platform, StyleSheet, View, Text, TouchableOpacity, ScrollView, Image } from 'react-native';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import * as GeoTIFF from 'geotiff';
 
@@ -60,6 +60,8 @@ const TIMESTEPS = generateTimesteps(LATEST_DATE_STR, TIMESTEP_COUNT, INTERVAL_MI
 export default function App() {
   const [selectedStep, setSelectedStep] = useState(TIMESTEPS[TIMESTEPS.length - 1]);
   const [selectedChannel, setSelectedChannel] = useState(CHANNELS[0]);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const playInterval = useRef<any>(null);
   const mapRef = useRef<any>(null);
   const mapInstance = useRef<any>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -103,6 +105,24 @@ export default function App() {
       });
     }
   }, []);
+
+  // Playback Logic
+  useEffect(() => {
+    if (isPlaying) {
+      playInterval.current = setInterval(() => {
+        setSelectedStep((prevStep) => {
+          const currentIndex = TIMESTEPS.findIndex(s => s.filenameTime === prevStep.filenameTime);
+          const nextIndex = (currentIndex + 1) % TIMESTEPS.length;
+          return TIMESTEPS[nextIndex];
+        });
+      }, 1000); // 1 second per frame
+    } else {
+      if (playInterval.current) clearInterval(playInterval.current);
+    }
+    return () => {
+      if (playInterval.current) clearInterval(playInterval.current);
+    };
+  }, [isPlaying]);
 
   // Update layer when selection changes
   useEffect(() => {
@@ -185,10 +205,15 @@ export default function App() {
 
     for (let i = 0; i < data.length; i++) {
       const val = data[i];
+      const idx = i * 4;
+      
+      if (isNaN(val)) {
+        rgba[idx] = 0; rgba[idx + 1] = 0; rgba[idx + 2] = 0; rgba[idx + 3] = 0;
+        continue;
+      }
+      
       const normalized = range === 0 ? 0 : (val - min) / range;
       const pixelVal = Math.floor(normalized * 255);
-      
-      const idx = i * 4;
       
       // Color Mapping
       if (channelId === 'lightning') {
@@ -231,6 +256,16 @@ export default function App() {
 
   return (
     <View style={styles.page}>
+      {/* Navbar */}
+      <View style={styles.navbar}>
+        <Image 
+          source={{ uri: '/logo.png' }} 
+          style={styles.logo} 
+          resizeMode="contain" 
+        />
+        <Text style={styles.title}>FlashNet</Text>
+      </View>
+
       {Platform.OS === 'web' ? (
         <div ref={mapRef} style={styles.map} />
       ) : (
@@ -247,18 +282,27 @@ export default function App() {
 
       <View style={styles.controlsContainer}>
         {/* Channel Selector */}
-        <View style={styles.channelRow}>
-          {CHANNELS.map((ch) => (
-            <TouchableOpacity
-              key={ch.id}
-              onPress={() => setSelectedChannel(ch)}
-              style={[styles.channelBtn, selectedChannel.id === ch.id && styles.selectedBtn]}
+        <View style={styles.controlsRow}>
+            <TouchableOpacity 
+              onPress={() => setIsPlaying(!isPlaying)}
+              style={[styles.playBtn, isPlaying && styles.pauseBtn]}
             >
-              <Text style={[styles.btnText, selectedChannel.id === ch.id && styles.selectedBtnText]}>
-                {ch.label}
-              </Text>
+              <Text style={styles.playBtnText}>{isPlaying ? "⏸" : "▶"}</Text>
             </TouchableOpacity>
-          ))}
+
+            <View style={styles.channelRow}>
+              {CHANNELS.map((ch) => (
+                <TouchableOpacity
+                  key={ch.id}
+                  onPress={() => setSelectedChannel(ch)}
+                  style={[styles.channelBtn, selectedChannel.id === ch.id && styles.selectedBtn]}
+                >
+                  <Text style={[styles.btnText, selectedChannel.id === ch.id && styles.selectedBtnText]}>
+                    {ch.label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
         </View>
 
         {/* Time Slider */}
@@ -288,17 +332,38 @@ export default function App() {
 const styles = StyleSheet.create({
   page: {
     flex: 1,
-    height: '100vh',
-    backgroundColor: '#f5f5f5'
+    height: '100%',
+    backgroundColor: '#000' // Changed to black to match theme
+  },
+  navbar: {
+    height: 60,
+    backgroundColor: '#000',
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 15,
+    borderBottomWidth: 1,
+    borderBottomColor: '#00FFFF', // Cyan border
+    zIndex: 2000,
+  },
+  logo: {
+    width: 40,
+    height: 40,
+    marginRight: 10,
+  },
+  title: {
+    color: '#00FFFF', // Cyan text
+    fontSize: 20,
+    fontWeight: 'bold',
+    letterSpacing: 1,
   },
   map: {
     flex: 1,
-    height: '100%',
     width: '100%',
+    // Removed minHeight to allow flex layout with navbar
   },
   loader: {
     position: 'absolute',
-    top: 20,
+    top: 80, // Moved down below navbar
     left: '50%',
     transform: [{ translateX: '-50%' }],
     backgroundColor: 'rgba(0,0,0,0.7)',
@@ -318,9 +383,33 @@ const styles = StyleSheet.create({
     zIndex: 1000,
     alignItems: 'center',
   },
+  controlsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 10,
+    width: '100%',
+    justifyContent: 'center',
+  },
+  playBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#007AFF',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 10,
+    elevation: 4,
+  },
+  pauseBtn: {
+    backgroundColor: '#FF3B30',
+  },
+  playBtnText: {
+    color: 'white',
+    fontSize: 18,
+    fontWeight: 'bold',
+  },
   channelRow: {
     flexDirection: 'row',
-    marginBottom: 10,
     backgroundColor: 'rgba(255,255,255,0.9)',
     borderRadius: 25,
     padding: 4,
