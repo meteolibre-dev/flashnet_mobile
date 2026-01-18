@@ -1,7 +1,20 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { StyleSheet, View, Text, TouchableOpacity, ScrollView, Image, SafeAreaView, Platform, StatusBar } from 'react-native';
+import React, { useEffect, useRef, useState, useMemo } from 'react';
+import { Platform, StyleSheet, View, Text, TouchableOpacity, ScrollView, Image } from 'react-native';
+import 'maplibre-gl/dist/maplibre-gl.css';
+import * as GeoTIFF from 'geotiff';
 
 // --- Configuration ---
+const REGION = {
+  west: -10.0,
+  north: 65.0,
+  east: 33.0,
+  south: 33.0,
+};
+
+const LATEST_DATE_STR = "202601160050"; // YYYYMMDDHHmm
+const TIMESTEP_COUNT = 18;
+const INTERVAL_MINUTES = 10;
+
 const CHANNELS = [
   { id: 'lightning', label: 'Lightning' },
   { id: 'sat_ch0', label: 'VIS (Ch0)' },
@@ -76,7 +89,50 @@ export default function App() {
   const [selectedChannel, setSelectedChannel] = useState(CHANNELS[0]);
   const [isPlaying, setIsPlaying] = useState(false);
   const playInterval = useRef<any>(null);
+  const mapRef = useRef<any>(null);
+  const mapInstance = useRef<any>(null);
+  const [isLoading, setIsLoading] = useState(false);
   const [isScanning, setIsScanning] = useState(true);
+
+  // Initialize Map (Web Only)
+  useEffect(() => {
+    if (Platform.OS === 'web' && mapRef.current) {
+      import('maplibre-gl').then(({ Map, NavigationControl }) => {
+        const map = new Map({
+          container: mapRef.current,
+          style: {
+            version: 8,
+            sources: {
+              'osm': {
+                type: 'raster',
+                tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+                tileSize: 256,
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+              }
+            },
+            layers: [
+              {
+                id: 'osm',
+                type: 'raster',
+                source: 'osm',
+                minzoom: 0,
+                maxzoom: 19
+              }
+            ]
+          },
+          center: [(REGION.west + REGION.east) / 2, (REGION.north + REGION.south) / 2],
+          zoom: 3
+        });
+
+        mapInstance.current = map;
+        map.addControl(new NavigationControl());
+
+        map.on('load', () => {
+          updateMapLayer();
+        });
+      });
+    }
+  }, []);
 
   // Scan for available timesteps
   useEffect(() => {
@@ -116,20 +172,161 @@ export default function App() {
     };
   }, [isPlaying, timesteps]);
 
+  // Update layer when selection changes
+  useEffect(() => {
+    if (mapInstance.current && mapInstance.current.isStyleLoaded() && selectedStep) {
+      updateMapLayer();
+    }
+  }, [selectedStep, selectedChannel]);
+
+  const updateMapLayer = async () => {
+    if (!mapInstance.current || !selectedStep) return;
+    const map = mapInstance.current;
+    
+    setIsLoading(true);
+    try {
+      const url = `${BASE_BUCKET_URL}/${selectedStep.dateFolder}/forecast_${selectedStep.filenameTime}_${selectedChannel.id}.tiff`;
+      console.log('Fetching:', url);
+
+      const dataUrl = await fetchAndProcessTiff(url, selectedChannel.id);
+
+      const coordinates = [
+        [REGION.west, REGION.north], // TL
+        [REGION.east, REGION.north], // TR
+        [REGION.east, REGION.south], // BR
+        [REGION.west, REGION.south]  // BL
+      ];
+
+      const sourceId = 'forecast-source';
+      const layerId = 'forecast-layer';
+
+      const source = map.getSource(sourceId);
+      if (source) {
+        source.updateImage({ url: dataUrl, coordinates });
+      } else {
+        map.addSource(sourceId, {
+          type: 'image',
+          url: dataUrl,
+          coordinates: coordinates
+        });
+
+        map.addLayer({
+          id: layerId,
+          type: 'raster',
+          source: sourceId,
+          paint: {
+            'raster-opacity': 0.8,
+            'raster-fade-duration': 0
+          }
+        });
+      }
+    } catch (error) {
+      console.error('Error updating layer:', error);
+      // Optional: Show user feedback
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const fetchAndProcessTiff = async (url: string, channelId: string): Promise<string> => {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`Failed to fetch TIFF: ${response.statusText}`);
+    
+    const arrayBuffer = await response.arrayBuffer();
+    const tiff = await GeoTIFF.fromArrayBuffer(arrayBuffer);
+    const image = await tiff.getImage();
+    const rasters = await image.readRasters(); // returns list of typed arrays
+    const data: any = rasters[0]; // Assuming single band for these files
+    const width = image.getWidth();
+    const height = image.getHeight();
+
+    // Normalization logic with fixed ranges for consistency across timesteps
+    const RANGES: { [key: string]: { min: number, max: number } } = {
+      'lightning': { min: 0, max: 20 },
+      'sat_ch0': { min: -5, max: 15 },
+      'sat_ch1': { min: -50, max: 120 },
+    };
+
+    const rangeConfig = RANGES[channelId] || { min: 0, max: 1 };
+    const { min, max } = rangeConfig;
+    const range = max - min;
+    const rgba = new Uint8ClampedArray(width * height * 4);
+
+    for (let i = 0; i < data.length; i++) {
+      const val = data[i];
+      const idx = i * 4;
+      
+      if (isNaN(val)) {
+        rgba[idx] = 0; rgba[idx + 1] = 0; rgba[idx + 2] = 0; rgba[idx + 3] = 0;
+        continue;
+      }
+      
+      // Clamp value to fixed range then normalize
+      const clampedVal = Math.max(min, Math.min(max, val));
+      const normalized = range === 0 ? 0 : (clampedVal - min) / range;
+      const pixelVal = Math.floor(normalized * 255);
+      
+      // Color Mapping
+      if (channelId === 'lightning') {
+        // Lightning: Transparent to Yellow/Red
+        if (pixelVal < 5) { // Threshold for transparency
+            rgba[idx] = 0; rgba[idx + 1] = 0; rgba[idx + 2] = 0; rgba[idx + 3] = 0;
+        } else {
+            // Heatmap: Yellow (255, 255, 0) to Red (255, 0, 0)
+            const p = pixelVal / 255;
+            rgba[idx] = 255; // R
+            rgba[idx + 1] = Math.floor(255 * (1 - p)); // G
+            rgba[idx + 2] = 0; // B
+            rgba[idx + 3] = Math.floor(Math.min(255, pixelVal * 2));
+        }
+      } else {
+        // Satellite: Grayscale
+        rgba[idx] = pixelVal;
+        rgba[idx + 1] = pixelVal;
+        rgba[idx + 2] = pixelVal;
+        rgba[idx + 3] = 255;
+      }
+    }
+
+    // Create Canvas to convert to Data URL
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Could not get 2d context');
+    
+    const imageData = new ImageData(rgba, width, height);
+    ctx.putImageData(imageData, 0, 0);
+    
+    return canvas.toDataURL();
+  };
+
   return (
     <View style={styles.page}>
-      <StatusBar barStyle="light-content" />
       {/* Navbar */}
       <View style={styles.navbar}>
-        {/* Placeholder for local image if not available */}
+        <Image 
+          source={{ uri: '/logo.png' }} 
+          style={styles.logo} 
+          resizeMode="contain" 
+        />
         <Text style={styles.title}>FlashNet</Text>
       </View>
 
-      <View style={styles.map}>
-         <Text style={styles.placeholderText}>Map is Web-Only in this prototype</Text>
-         <Text style={styles.subText}>View on meteolibre.dev for full experience</Text>
-      </View>
+      {Platform.OS === 'web' ? (
+        <div ref={mapRef} style={styles.map} />
+      ) : (
+        <View style={styles.map}>
+           <Text style={{textAlign:'center', marginTop: 100}}>Map is Web-Only in this prototype</Text>
+        </View>
+      )}
       
+      {isLoading && (
+        <View style={styles.loader}>
+          <Text style={styles.loaderText}>Loading...</Text>
+        </View>
+      )}
+
       <View style={styles.controlsContainer}>
         {/* Channel Selector */}
         <View style={styles.controlsRow}>
@@ -189,8 +386,7 @@ const styles = StyleSheet.create({
   page: {
     flex: 1,
     height: '100%',
-    backgroundColor: '#000',
-    paddingTop: Platform.OS === 'android' ? 25 : 0
+    backgroundColor: '#000' // Changed to black to match theme
   },
   navbar: {
     height: 60,
@@ -199,7 +395,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingHorizontal: 15,
     borderBottomWidth: 1,
-    borderBottomColor: '#00FFFF',
+    borderBottomColor: '#00FFFF', // Cyan border
     zIndex: 2000,
   },
   logo: {
@@ -208,7 +404,7 @@ const styles = StyleSheet.create({
     marginRight: 10,
   },
   title: {
-    color: '#00FFFF',
+    color: '#00FFFF', // Cyan text
     fontSize: 20,
     fontWeight: 'bold',
     letterSpacing: 1,
@@ -216,24 +412,13 @@ const styles = StyleSheet.create({
   map: {
     flex: 1,
     width: '100%',
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: '#111'
-  },
-  placeholderText: {
-    color: '#00FFFF',
-    fontSize: 18,
-    marginBottom: 10
-  },
-  subText: {
-    color: '#888',
-    fontSize: 14
+    // Removed minHeight to allow flex layout with navbar
   },
   loader: {
     position: 'absolute',
-    top: 80,
+    top: 80, // Moved down below navbar
     left: '50%',
-    transform: [{ translateX: -50 }],
+    transform: [{ translateX: '-50%' }],
     backgroundColor: 'rgba(0,0,0,0.7)',
     padding: 10,
     borderRadius: 8,
