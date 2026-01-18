@@ -277,7 +277,7 @@ export default function App() {
             rgba[idx] = 255; // R
             rgba[idx + 1] = Math.floor(255 * (1 - p)); // G
             rgba[idx + 2] = 0; // B
-            rgba[idx + 3] = Math.floor(Math.min(255, pixelVal * 2));
+            rgba[idx + 3] = Math.floor(Math.min(255, 100 + pixelVal * 2));
         }
       } else {
         // Satellite: Grayscale

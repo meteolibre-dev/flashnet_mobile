@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "lightning-app",
-    "slug": "lightning-app",
+    "slug": "flashnet-y50onk",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -13,9 +13,11 @@
       "backgroundColor": "#ffffff"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "dev.meteolibre.lightningapp"
     },
     "android": {
+      "package": "dev.meteolibre.lightningapp",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
@@ -36,6 +38,11 @@
           }
         }
       ]
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "94c335b0-cece-42b4-8ec2-4aed1f3113ef"
+      }
+    }
   }
 }
