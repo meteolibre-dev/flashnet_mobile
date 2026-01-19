@@ -1,185 +1,195 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { StyleSheet, View, Text, TouchableOpacity, ScrollView, Image, SafeAreaView, Platform, StatusBar } from 'react-native';
+import { StyleSheet, View, Text, TouchableOpacity, ScrollView, Platform, StatusBar, Image } from 'react-native';
+import MapLibreGL from '@maplibre/maplibre-react-native';
+
+// Set access token if needed (null for MapLibre/OpenStreetMap)
+MapLibreGL.setAccessToken(null);
 
 // --- Configuration ---
-const CHANNELS = [
-  { id: 'lightning', label: 'Lightning' },
-  { id: 'sat_ch0', label: 'VIS (Ch0)' },
-  { id: 'sat_ch1', label: 'IR (Ch1)' },
+const COORDINATES = [
+  [-81.2778265, 77.3564187], // TL
+  [81.2904694, 77.3564187],  // TR
+  [81.2904694, -77.3690833], // BR
+  [-81.2778265, -77.3690833] // BL
 ];
 
-const BASE_BUCKET_URL = "https://storage.googleapis.com/inference_result/forecasts";
-
-interface Timestep {
-  dateFolder: string;
-  filenameTime: string;
-  label: string;
-  fullDate: Date;
-}
-
-const scanAvailableTimesteps = async (maxTimesteps: number = 18): Promise<Timestep[]> => {
-  const availableTimesteps: Timestep[] = [];
-  const now = new Date();
-  
-  // We'll check today and yesterday to ensure we have enough data
-  const datesToCheck = [];
-  for (let i = 0; i < 2; i++) {
-    const d = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
-    datesToCheck.push(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`);
-  }
-
-  for (const dateFolder of datesToCheck) {
-    const listUrl = `https://storage.googleapis.com/storage/v1/b/inference_result/o?prefix=forecasts/${dateFolder}/`;
-    try {
-      const response = await fetch(listUrl);
-      if (response.ok) {
-        const data = await response.json();
-        if (data.items) {
-          for (const item of data.items) {
-            // Pattern: forecasts/YYYY-MM-DD/forecast_YYYYMMDDHHmm_lightning.tiff
-            // We only need to check for one channel to identify the timestep
-            const match = item.name.match(/forecast_(\d{12})_lightning\.tiff$/);
-            if (match) {
-              const filenameTime = match[1];
-              const year = filenameTime.substring(0, 4);
-              const month = filenameTime.substring(4, 6);
-              const day = filenameTime.substring(6, 8);
-              const hour = filenameTime.substring(8, 10);
-              const minute = filenameTime.substring(10, 12);
-              
-              // Create UTC date object
-              const fullDate = new Date(`${year}-${month}-${day}T${hour}:${minute}:00Z`);
-              
-              if (!availableTimesteps.find(s => s.filenameTime === filenameTime)) {
-                availableTimesteps.push({
-                  dateFolder,
-                  filenameTime,
-                  label: `${hour}:${minute}`,
-                  fullDate
-                });
-              }
-            }
-          }
-        }
-      }
-    } catch (error) {
-      console.error(`Error listing files for ${dateFolder}:`, error);
+// Simplified Dark Style derived from demotiles
+const MAP_STYLE = {
+  "version": 8,
+  "name": "Simplified Dark",
+  "sources": {
+    "maplibre": {
+      "type": "vector",
+      "url": "https://demotiles.maplibre.org/tiles/tiles.json"
     }
-  }
-  
-  return availableTimesteps.sort((a, b) => a.fullDate.getTime() - b.fullDate.getTime()).slice(-maxTimesteps);
+  },
+  "layers": [
+    {
+      "id": "background",
+      "type": "background",
+      "paint": {
+        "background-color": "#000000"
+      }
+    },
+    {
+      "id": "coastline",
+      "type": "line",
+      "source": "maplibre",
+      "source-layer": "countries",
+      "paint": {
+        "line-color": "#333333",
+        "line-width": 1
+      }
+    },
+    {
+      "id": "countries-boundary",
+      "type": "line",
+      "source": "maplibre",
+      "source-layer": "countries",
+      "paint": {
+        "line-color": "#FFFFFF",
+        "line-width": 1,
+        "line-opacity": 0.5
+      }
+    },
+    {
+      "id": "countries-label",
+      "type": "symbol",
+      "source": "maplibre",
+      "source-layer": "centroids",
+      "minzoom": 2,
+      "layout": {
+        "text-field": "{NAME}",
+        "text-font": ["Open Sans Semibold"],
+        "text-transform": "uppercase",
+        "text-size": 12
+      },
+      "paint": {
+        "text-color": "#FFFFFF",
+        "text-halo-color": "#000000",
+        "text-halo-width": 1
+      }
+    }
+  ]
 };
 
+// --- Local Data Files ---
+// Hardcoded requires as requested
+const LOCAL_FILES: { [key: string]: any } = {
+  '20250725180000': require('./assets/data/forecast_20250725180000_lightning.png'),
+  '20250725181000': require('./assets/data/forecast_20250725181000_lightning.png'),
+  '20250725182000': require('./assets/data/forecast_20250725182000_lightning.png'),
+};
+
+interface Timestep {
+  id: string;
+  label: string;
+  imageSource: any;
+}
+
+const TIMESTEPS: Timestep[] = Object.keys(LOCAL_FILES).sort().map(key => {
+  const hour = key.substring(8, 10);
+  const minute = key.substring(10, 12);
+  return {
+    id: key,
+    label: `${hour}:${minute}`,
+    imageSource: LOCAL_FILES[key]
+  };
+});
+
 export default function App() {
-  const [timesteps, setTimesteps] = useState<Timestep[]>([]);
-  const [selectedStep, setSelectedStep] = useState<Timestep | null>(null);
-  const [selectedChannel, setSelectedChannel] = useState(CHANNELS[0]);
+  const [selectedStep, setSelectedStep] = useState<Timestep>(TIMESTEPS[0]);
   const [isPlaying, setIsPlaying] = useState(false);
   const playInterval = useRef<any>(null);
-  const [isScanning, setIsScanning] = useState(true);
-
-  // Scan for available timesteps
-  useEffect(() => {
-    const initTimesteps = async () => {
-      setIsScanning(true);
-      try {
-        const available = await scanAvailableTimesteps(18);
-        setTimesteps(available);
-        if (available.length > 0) {
-          setSelectedStep(available[available.length - 1]);
-        }
-      } catch (error) {
-        console.error('Error scanning timesteps:', error);
-      } finally {
-        setIsScanning(false);
-      }
-    };
-    initTimesteps();
-  }, []);
 
   // Playback Logic
   useEffect(() => {
-    if (isPlaying && timesteps.length > 0) {
+    if (isPlaying) {
       playInterval.current = setInterval(() => {
         setSelectedStep((prevStep) => {
-          if (!prevStep) return timesteps[0];
-          const currentIndex = timesteps.findIndex(s => s.filenameTime === prevStep.filenameTime);
-          const nextIndex = (currentIndex + 1) % timesteps.length;
-          return timesteps[nextIndex];
+          const currentIndex = TIMESTEPS.findIndex(s => s.id === prevStep.id);
+          const nextIndex = (currentIndex + 1) % TIMESTEPS.length;
+          return TIMESTEPS[nextIndex];
         });
-      }, 1000); // 1 second per frame
+      }, 1000);
     } else {
       if (playInterval.current) clearInterval(playInterval.current);
     }
     return () => {
       if (playInterval.current) clearInterval(playInterval.current);
     };
-  }, [isPlaying, timesteps]);
+  }, [isPlaying]);
 
   return (
     <View style={styles.page}>
       <StatusBar barStyle="light-content" />
+      
       {/* Navbar */}
       <View style={styles.navbar}>
-        {/* Placeholder for local image if not available */}
         <Text style={styles.title}>FlashNet</Text>
       </View>
 
-      <View style={styles.map}>
-         <Text style={styles.placeholderText}>Map is Web-Only in this prototype</Text>
-         <Text style={styles.subText}>View on meteolibre.dev for full experience</Text>
-      </View>
+      {/* Map */}
+      <MapLibreGL.MapView
+        style={styles.map}
+        styleJSON={JSON.stringify(MAP_STYLE)}
+        logoEnabled={false}
+        attributionEnabled={false}
+      >
+        <MapLibreGL.Camera
+          defaultSettings={{
+            centerCoordinate: [0, 0],
+            zoomLevel: 1
+          }}
+        />
+
+        {/* Lightning Overlay */}
+        {selectedStep && (
+          <MapLibreGL.ImageSource
+            id="lightning-source"
+            coordinates={COORDINATES}
+            url={Image.resolveAssetSource(selectedStep.imageSource).uri}
+          >
+            <MapLibreGL.RasterLayer
+              id="lightning-layer"
+              style={{
+                rasterOpacity: 0.8,
+                rasterFadeDuration: 0
+              }}
+            />
+          </MapLibreGL.ImageSource>
+        )}
+      </MapLibreGL.MapView>
       
+      {/* Controls */}
       <View style={styles.controlsContainer}>
-        {/* Channel Selector */}
         <View style={styles.controlsRow}>
             <TouchableOpacity 
               onPress={() => setIsPlaying(!isPlaying)}
               style={[styles.playBtn, isPlaying && styles.pauseBtn]}
             >
-              <Text style={styles.playBtnText}>{isPlaying ? "⏸" : "▶"}</Text>
+              <Text style={styles.playBtnText}>{isPlaying ? "II" : "▶"}</Text>
             </TouchableOpacity>
 
-            <View style={styles.channelRow}>
-              {CHANNELS.map((ch) => (
+             <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              style={styles.timeScroll}
+              contentContainerStyle={styles.scrollContent}
+            >
+              {TIMESTEPS.map((step) => (
                 <TouchableOpacity
-                  key={ch.id}
-                  onPress={() => setSelectedChannel(ch)}
-                  style={[styles.channelBtn, selectedChannel.id === ch.id && styles.selectedBtn]}
+                  key={step.id}
+                  onPress={() => setSelectedStep(step)}
+                  style={[styles.timeBtn, selectedStep.id === step.id && styles.selectedBtn]}
                 >
-                  <Text style={[styles.btnText, selectedChannel.id === ch.id && styles.selectedBtnText]}>
-                    {ch.label}
+                  <Text style={[styles.btnText, selectedStep.id === step.id && styles.selectedBtnText]}>
+                    {step.label}
                   </Text>
                 </TouchableOpacity>
               ))}
-            </View>
+            </ScrollView>
         </View>
-
-        {/* Time Slider */}
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          style={styles.timeScroll}
-          contentContainerStyle={styles.scrollContent}
-        >
-          {isScanning ? (
-            <Text style={styles.scanningText}>Scanning for available timesteps...</Text>
-          ) : timesteps.length === 0 ? (
-            <Text style={styles.errorText}>No timesteps available</Text>
-          ) : (
-            timesteps.map((step) => (
-              <TouchableOpacity
-                key={step.filenameTime}
-                onPress={() => setSelectedStep(step)}
-                style={[styles.timeBtn, selectedStep?.filenameTime === step.filenameTime && styles.selectedBtn]}
-              >
-                <Text style={[styles.btnText, selectedStep?.filenameTime === step.filenameTime && styles.selectedBtnText]}>
-                  {step.label}
-                </Text>
-              </TouchableOpacity>
-            ))
-          )}
-        </ScrollView>
       </View>
     </View>
   );
@@ -188,9 +198,7 @@ export default function App() {
 const styles = StyleSheet.create({
   page: {
     flex: 1,
-    height: '100%',
     backgroundColor: '#000',
-    paddingTop: Platform.OS === 'android' ? 25 : 0
   },
   navbar: {
     height: 60,
@@ -200,12 +208,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 15,
     borderBottomWidth: 1,
     borderBottomColor: '#00FFFF',
-    zIndex: 2000,
-  },
-  logo: {
-    width: 40,
-    height: 40,
-    marginRight: 10,
+    zIndex: 10,
+    marginTop: Platform.OS === 'android' ? 25 : 0
   },
   title: {
     color: '#00FFFF',
@@ -215,48 +219,22 @@ const styles = StyleSheet.create({
   },
   map: {
     flex: 1,
-    width: '100%',
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: '#111'
-  },
-  placeholderText: {
-    color: '#00FFFF',
-    fontSize: 18,
-    marginBottom: 10
-  },
-  subText: {
-    color: '#888',
-    fontSize: 14
-  },
-  loader: {
-    position: 'absolute',
-    top: 80,
-    left: '50%',
-    transform: [{ translateX: -50 }],
-    backgroundColor: 'rgba(0,0,0,0.7)',
-    padding: 10,
-    borderRadius: 8,
-    zIndex: 2000,
-  },
-  loaderText: {
-    color: 'white',
-    fontWeight: 'bold',
   },
   controlsContainer: {
     position: 'absolute',
-    bottom: 20,
+    bottom: 30,
     left: 10,
     right: 10,
-    zIndex: 1000,
-    alignItems: 'center',
+    zIndex: 100,
   },
   controlsRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 10,
-    width: '100%',
-    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.8)',
+    borderRadius: 20,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: '#333'
   },
   playBtn: {
     width: 40,
@@ -266,67 +244,37 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     marginRight: 10,
-    elevation: 4,
   },
   pauseBtn: {
     backgroundColor: '#FF3B30',
   },
   playBtnText: {
     color: 'white',
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: 'bold',
   },
-  channelRow: {
-    flexDirection: 'row',
-    backgroundColor: 'rgba(255,255,255,0.9)',
-    borderRadius: 25,
-    padding: 4,
-    elevation: 4,
-  },
-  channelBtn: {
-    paddingVertical: 8,
-    paddingHorizontal: 16,
-    borderRadius: 20,
-  },
   timeScroll: {
-    maxHeight: 50,
-    width: '100%',
+    flex: 1,
   },
   scrollContent: {
-    paddingHorizontal: 10,
+    alignItems: 'center',
   },
   timeBtn: {
-    backgroundColor: 'rgba(255,255,255,0.9)',
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 20,
-    marginRight: 8,
-    borderWidth: 1,
-    borderColor: '#ddd',
-    elevation: 2,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 15,
+    marginRight: 5,
+    backgroundColor: 'rgba(255,255,255,0.1)',
   },
   selectedBtn: {
     backgroundColor: '#007AFF',
-    borderColor: '#007AFF',
   },
   btnText: {
+    color: '#888',
     fontSize: 12,
-    fontWeight: '600',
-    color: '#333',
   },
   selectedBtnText: {
     color: 'white',
-  },
-  scanningText: {
-    color: '#00FFFF',
-    fontSize: 12,
-    fontWeight: '600',
-    paddingVertical: 10,
-  },
-  errorText: {
-    color: '#FF3B30',
-    fontSize: 12,
-    fontWeight: '600',
-    paddingVertical: 10,
-  },
+    fontWeight: 'bold',
+  }
 });
