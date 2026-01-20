@@ -14,7 +14,7 @@ const fetch = require('node-fetch'); // Need to install this or use built-in if 
 const app = express();
 app.use(cors());
 
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 const CACHE_DIR = path.join(__dirname, 'cache');
 
 // Ensure cache directory exists
