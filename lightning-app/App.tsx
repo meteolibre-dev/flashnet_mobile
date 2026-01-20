@@ -1,13 +1,10 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { StyleSheet, View, Text, TouchableOpacity, ScrollView, Platform, StatusBar, Image, TextInput, Dimensions } from 'react-native';
 import MapLibreGL from '@maplibre/maplibre-react-native';
-import * as GeoTIFF from 'geotiff';
-import { Buffer } from 'buffer';
+import * as SplashScreen from 'expo-splash-screen';
 
-// Polyfill Buffer for GeoTIFF if needed
-if (typeof global.Buffer === 'undefined') {
-  global.Buffer = Buffer;
-}
+// Keep the splash screen visible while we fetch resources
+SplashScreen.preventAutoHideAsync();
 
 // Set access token if needed (null for MapLibre/OpenStreetMap)
 MapLibreGL.setAccessToken(null);
@@ -21,6 +18,10 @@ const REGION = {
 };
 
 const BASE_BUCKET_URL = "https://storage.googleapis.com/inference_result/forecasts";
+// Android Emulator Localhost: 10.0.2.2
+// iOS Simulator Localhost: 127.0.0.1
+// Physical Device: Use your machine's LAN IP
+const SERVER_URL = Platform.OS === 'android' ? "http://10.0.2.2:3000" : "http://127.0.0.1:3000";
 
 const CHANNELS = [
   { id: 'lightning', label: 'Lightning' },
@@ -34,52 +35,6 @@ interface Timestep {
   label: string;
   fullDate: Date;
 }
-
-// --- BMP Generation Helper ---
-// Creates an uncompressed BMP image from RGBA data
-const createBmpUri = (width: number, height: number, rgbaData: Uint8Array): string => {
-  const headerSize = 54; // 14 (file header) + 40 (info header)
-  const fileSize = headerSize + rgbaData.length;
-  const buffer = new Uint8Array(fileSize);
-  const view = new DataView(buffer.buffer);
-
-  // Bitmap File Header
-  view.setUint16(0, 0x424D, false); // "BM" signature
-  view.setUint32(2, fileSize, true); // File size
-  view.setUint32(6, 0, true); // Reserved
-  view.setUint32(10, headerSize, true); // Offset to pixel data
-
-  // DIB Header (BITMAPINFOHEADER)
-  view.setUint32(14, 40, true); // Header size
-  view.setInt32(18, width, true); // Width
-  view.setInt32(22, -height, true); // Height (negative for top-down)
-  view.setUint16(26, 1, true); // Planes
-  view.setUint16(28, 32, true); // Bits per pixel (32 for RGBA)
-  view.setUint32(30, 0, true); // Compression (BI_RGB - no compression)
-  view.setUint32(34, rgbaData.length, true); // Image size
-  view.setInt32(38, 2835, true); // X pixels per meter (approx 72 DPI)
-  view.setInt32(42, 2835, true); // Y pixels per meter
-  view.setUint32(46, 0, true); // Colors used
-  view.setUint32(50, 0, true); // Important colors
-
-  // Pixel Data
-  // BMP stores color as BGRA, but our input is RGBA. We need to swap R and B.
-  // Also, MapLibre might expect RGBA or BGRA depending on implementation, but standard BMP is BGRA.
-  // Let's copy and swap.
-  let ptr = headerSize;
-  for (let i = 0; i < rgbaData.length; i += 4) {
-    buffer[ptr] = rgbaData[i + 2];     // B
-    buffer[ptr + 1] = rgbaData[i + 1]; // G
-    buffer[ptr + 2] = rgbaData[i];     // R
-    buffer[ptr + 3] = rgbaData[i + 3]; // A
-    ptr += 4;
-  }
-
-  // Convert to Base64
-  const binary = String.fromCharCode(...buffer);
-  const base64 = global.btoa ? global.btoa(binary) : Buffer.from(buffer).toString('base64');
-  return `data:image/bmp;base64,${base64}`;
-};
 
 const scanAvailableTimesteps = async (maxTimesteps: number = 18): Promise<Timestep[]> => {
   const availableTimesteps: Timestep[] = [];
@@ -136,15 +91,18 @@ export default function App() {
   const [selectedChannel, setSelectedChannel] = useState(CHANNELS[0]);
   const [isPlaying, setIsPlaying] = useState(false);
   const playInterval = useRef<any>(null);
-  const [isLoading, setIsLoading] = useState(false);
   const [isScanning, setIsScanning] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [showSearchResults, setShowSearchResults] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
   const [layerUrl, setLayerUrl] = useState<string | null>(null);
   const [layerCoordinates, setLayerCoordinates] = useState<any>(null);
+  const [nextLayerUrl, setNextLayerUrl] = useState<string | null>(null);
+  const [nextLayerCoordinates, setNextLayerCoordinates] = useState<any>(null);
+  const [activeLayerIndex, setActiveLayerIndex] = useState(0);
 
-  const cameraRef = useRef<MapLibreGL.Camera>(null);
+  const cameraRef = useRef<any>(null);
 
   // Initialize Data
   useEffect(() => {
@@ -160,6 +118,7 @@ export default function App() {
         console.error('Error scanning timesteps:', error);
       } finally {
         setIsScanning(false);
+        await SplashScreen.hideAsync();
       }
     };
     initTimesteps();
@@ -239,108 +198,35 @@ export default function App() {
         
         setIsLoading(true);
         try {
-          const url = `${BASE_BUCKET_URL}/${selectedStep.dateFolder}/forecast_${selectedStep.filenameTime}_${selectedChannel.id}.tiff`;
-          console.log('Fetching:', url);
-    
-          const response = await fetch(url);
-          if (!response.ok) throw new Error(`Failed to fetch TIFF: ${response.statusText}`);
+          const tiffUrl = `${BASE_BUCKET_URL}/${selectedStep.dateFolder}/forecast_${selectedStep.filenameTime}_${selectedChannel.id}.tiff`;
           
-          const arrayBuffer = await response.arrayBuffer();
-          const tiff = await GeoTIFF.fromArrayBuffer(arrayBuffer);
-          const image = await tiff.getImage();
-          const bbox = image.getBoundingBox();
-          const [minX, minY, maxX, maxY] = bbox;
-    
-          // Process TIFF Data
-          const rasters = await image.readRasters();
-          const data: any = rasters[0];
-          const width = image.getWidth();
-          const height = image.getHeight();
-          const resolution = image.getResolution();
-          const [scaleX, scaleY] = resolution;
-          const needsVerticalFlip = scaleY > 0;
-
-          // NoData handling
-          const fileDirectory = image.getFileDirectory();
-          let noDataValue = null;
-          if (fileDirectory.GDAL_NODATA) {
-             const cleanStr = String(fileDirectory.GDAL_NODATA).replace(/\0/g, '').trim();
-             noDataValue = cleanStr.toLowerCase() === 'nan' ? NaN : parseFloat(cleanStr);
+          // 1. Get Metadata (Coordinates)
+          const metaUrl = `${SERVER_URL}/metadata?url=${encodeURIComponent(tiffUrl)}`;
+          const metaRes = await fetch(metaUrl);
+          if (!metaRes.ok) throw new Error('Failed to fetch metadata');
+          const metaData = await metaRes.json();
+          
+          // 2. Set Image URL
+          const imageUrl = `${SERVER_URL}/image?url=${encodeURIComponent(tiffUrl)}&channel=${selectedChannel.id}`;
+          
+          // Double Buffering Logic
+          // We load the new image into the "next" layer slot
+          // In React Native MapLibre, we can't easily detect "onLoad".
+          // However, since we are using a local server that caches the PNG, the load should be fast.
+          // We will update the "active" layer pointer immediately, but we keep rendering BOTH layers.
+          // The "new" layer will render on top of the "old" layer.
+          
+          if (activeLayerIndex === 0) {
+             setNextLayerUrl(imageUrl);
+             setNextLayerCoordinates(metaData.coordinates);
+             setActiveLayerIndex(1);
+             // After a delay, clear the old layer to save memory? 
+             // Or just keep it. It's hidden by the new one.
+          } else {
+             setLayerUrl(imageUrl);
+             setLayerCoordinates(metaData.coordinates);
+             setActiveLayerIndex(0);
           }
-
-          // Ranges
-          const RANGES: { [key: string]: { min: number, max: number } } = {
-            'lightning': { min: 0, max: 20 },
-            'sat_ch0': { min: -2, max: 15 },
-            'sat_ch1': { min: -3, max: 120 },
-          };
-          const { min, max } = RANGES[selectedChannel.id] || { min: 0, max: 1 };
-          const range = max - min;
-          const rgba = new Uint8ClampedArray(width * height * 4);
-
-          // Reprojection logic (Simplified for performance, similar to Web)
-          // Note: In a real native app, consider doing this in C++ or using a shader if performance is bad.
-          // For now, we stick to JS logic matching the web version.
-          
-          const latRad = (lat: number) => lat * Math.PI / 180;
-          const mercY = (lat: number) => Math.log(Math.tan(latRad(lat) / 2 + Math.PI / 4));
-          const yMaxMerc = mercY(maxY);
-          const yMinMerc = mercY(minY);
-          const mercHeight = yMaxMerc - yMinMerc;
-
-          for (let y = 0; y < height; y++) {
-            const v = y / height;
-            const currentMercY = yMaxMerc - v * mercHeight;
-            const currentLat = (2 * Math.atan(Math.exp(currentMercY)) - Math.PI / 2) * 180 / Math.PI;
-            const sourceV = (maxY - currentLat) / (maxY - minY);
-            let sourceRow = Math.floor(sourceV * height);
-            sourceRow = Math.max(0, Math.min(height - 1, sourceRow));
-            if (needsVerticalFlip) sourceRow = height - 1 - sourceRow;
-
-            const sourceRowOffset = sourceRow * width;
-            const targetRowOffset = y * width * 4;
-
-            for (let x = 0; x < width; x++) {
-                const val = data[sourceRowOffset + x];
-                const idx = targetRowOffset + x * 4;
-                const isNoData = isNaN(val) || (noDataValue !== null && !isNaN(noDataValue) && val === noDataValue);
-
-                if (isNoData) {
-                    rgba[idx] = 0; rgba[idx+1] = 0; rgba[idx+2] = 0; rgba[idx+3] = 0;
-                    continue;
-                }
-
-                const clampedVal = Math.max(min, Math.min(max, val));
-                const normalized = range === 0 ? 0 : (clampedVal - min) / range;
-                const pixelVal = Math.floor(normalized * 255);
-
-                if (selectedChannel.id === 'lightning') {
-                    if (pixelVal < 5) {
-                        rgba[idx] = 0; rgba[idx+1] = 0; rgba[idx+2] = 0; rgba[idx+3] = 0;
-                    } else {
-                        const p = pixelVal / 255;
-                        rgba[idx] = 255;
-                        rgba[idx+1] = Math.floor(255 * (1 - p));
-                        rgba[idx+2] = 0;
-                        rgba[idx+3] = Math.floor(Math.min(255, 100 + pixelVal * 2));
-                    }
-                } else {
-                    rgba[idx] = pixelVal; rgba[idx+1] = pixelVal; rgba[idx+2] = pixelVal; rgba[idx+3] = 255;
-                }
-            }
-          }
-
-          // Generate BMP
-          const bmpUri = createBmpUri(width, height, rgba);
-          setLayerUrl(bmpUri);
-          
-          // Coordinates: [TL, TR, BR, BL]
-          setLayerCoordinates([
-            [minX, maxY],
-            [maxX, maxY],
-            [maxX, minY],
-            [minX, minY]
-          ]);
 
         } catch (error) {
             console.error('Error updating layer:', error);
@@ -352,30 +238,6 @@ export default function App() {
     updateLayer();
   }, [selectedStep, selectedChannel]);
 
-
-  // Map Style - Using OpenStreetMap Raster to match Web
-  const MAP_STYLE = {
-    "version": 8,
-    "name": "OSM",
-    "sources": {
-      "osm": {
-        "type": "raster",
-        "tiles": ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
-        "tileSize": 256,
-        "attribution": "© OpenStreetMap contributors"
-      }
-    },
-    "layers": [
-      {
-        "id": "osm",
-        "type": "raster",
-        "source": "osm",
-        "minzoom": 0,
-        "maxzoom": 19
-      }
-    ]
-  };
-
   return (
     <View style={styles.page}>
       <StatusBar barStyle="light-content" />
@@ -383,7 +245,7 @@ export default function App() {
       {/* Navbar */}
       <View style={styles.navbar}>
         <Image 
-            source={require('./assets/icon.png')} // Assuming icon exists, or use a placeholder
+            source={require('./public/logo_small.png')} 
             style={styles.logo} 
             resizeMode="contain" 
         />
@@ -420,7 +282,8 @@ export default function App() {
       {/* Map */}
       <MapLibreGL.MapView
         style={styles.map}
-        styleJSON={JSON.stringify(MAP_STYLE)}
+        // @ts-ignore
+        styleURL="https://demotiles.maplibre.org/style.json"
         logoEnabled={false}
         attributionEnabled={false}
       >
@@ -432,21 +295,35 @@ export default function App() {
           }}
         />
 
-        {/* Overlay */}
-        {layerUrl && layerCoordinates && (
-          <MapLibreGL.ImageSource
-            id="forecast-source"
-            coordinates={layerCoordinates}
-            url={layerUrl}
-          >
-            <MapLibreGL.RasterLayer
-              id="forecast-layer"
-              style={{
-                rasterOpacity: selectedChannel.id.startsWith('sat_') ? 0.8 : 0.8,
-                rasterFadeDuration: 0
-              }}
-            />
-          </MapLibreGL.ImageSource>
+        {/* Overlay Layers - Dynamic Order */}
+        {activeLayerIndex === 1 ? (
+          <>
+             {/* Render 0 (Bottom) then 1 (Top) */}
+             {layerUrl && layerCoordinates && (
+               <MapLibreGL.ImageSource id="src-0" coordinates={layerCoordinates} url={layerUrl}>
+                 <MapLibreGL.RasterLayer id="layer-0" style={{ rasterOpacity: 0.8, rasterFadeDuration: 0 }} />
+               </MapLibreGL.ImageSource>
+             )}
+             {nextLayerUrl && nextLayerCoordinates && (
+               <MapLibreGL.ImageSource id="src-1" coordinates={nextLayerCoordinates} url={nextLayerUrl}>
+                 <MapLibreGL.RasterLayer id="layer-1" style={{ rasterOpacity: 0.8, rasterFadeDuration: 0 }} />
+               </MapLibreGL.ImageSource>
+             )}
+          </>
+        ) : (
+          <>
+             {/* Render 1 (Bottom) then 0 (Top) */}
+             {nextLayerUrl && nextLayerCoordinates && (
+               <MapLibreGL.ImageSource id="src-1" coordinates={nextLayerCoordinates} url={nextLayerUrl}>
+                 <MapLibreGL.RasterLayer id="layer-1" style={{ rasterOpacity: 0.8, rasterFadeDuration: 0 }} />
+               </MapLibreGL.ImageSource>
+             )}
+             {layerUrl && layerCoordinates && (
+               <MapLibreGL.ImageSource id="src-0" coordinates={layerCoordinates} url={layerUrl}>
+                 <MapLibreGL.RasterLayer id="layer-0" style={{ rasterOpacity: 0.8, rasterFadeDuration: 0 }} />
+               </MapLibreGL.ImageSource>
+             )}
+          </>
         )}
       </MapLibreGL.MapView>
       

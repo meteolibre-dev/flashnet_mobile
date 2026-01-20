@@ -1,7 +1,6 @@
 import React, { useEffect, useRef, useState, useMemo } from 'react';
 import { Platform, StyleSheet, View, Text, TouchableOpacity, ScrollView, Image, TextInput, Animated, Dimensions, Easing } from 'react-native';
 import 'maplibre-gl/dist/maplibre-gl.css';
-import * as GeoTIFF from 'geotiff';
 
 // --- Configuration ---
 const REGION = {
@@ -11,17 +10,14 @@ const REGION = {
   south: 33.0,
 };
 
-const LATEST_DATE_STR = "202601160050"; // YYYYMMDDHHmm
-const TIMESTEP_COUNT = 18;
-const INTERVAL_MINUTES = 10;
+const BASE_BUCKET_URL = "https://storage.googleapis.com/inference_result/forecasts";
+const SERVER_URL = "http://localhost:3000"; // Web defaults to localhost
 
 const CHANNELS = [
   { id: 'lightning', label: 'Lightning' },
   { id: 'sat_ch0', label: 'VIS (Ch0)' },
   { id: 'sat_ch1', label: 'IR (Ch1)' },
 ];
-
-const BASE_BUCKET_URL = "https://storage.googleapis.com/inference_result/forecasts";
 
 interface Timestep {
   dateFolder: string;
@@ -263,280 +259,52 @@ export default function App() {
     if (!mapInstance.current || !selectedStep) return;
     const map = mapInstance.current;
     
+    // Clean up previous layers/sources
+    if (map.getLayer('forecast-layer')) map.removeLayer('forecast-layer');
+    if (map.getSource('forecast-source')) map.removeSource('forecast-source');
+
     setIsLoading(true);
     try {
-      const url = `${BASE_BUCKET_URL}/${selectedStep.dateFolder}/forecast_${selectedStep.filenameTime}_${selectedChannel.id}.tiff`;
-      console.log('Fetching:', url);
-
-      // Fetch and process TIFF
-      // We need to get dimensions to calculate true bounds based on resolution
-      const response = await fetch(url);
-      if (!response.ok) throw new Error(`Failed to fetch TIFF: ${response.statusText}`);
+      const tiffUrl = `${BASE_BUCKET_URL}/${selectedStep.dateFolder}/forecast_${selectedStep.filenameTime}_${selectedChannel.id}.tiff`;
       
-      const arrayBuffer = await response.arrayBuffer();
-      const tiff = await GeoTIFF.fromArrayBuffer(arrayBuffer);
-      const image = await tiff.getImage();
-      // Get geo-information directly from the TIFF file
-      const bbox = image.getBoundingBox();
-      const [minX, minY, maxX, maxY] = bbox;
+      // 1. Get Metadata (Coordinates)
+      const metaUrl = `${SERVER_URL}/metadata?url=${encodeURIComponent(tiffUrl)}`;
+      const metaRes = await fetch(metaUrl);
+      if (!metaRes.ok) throw new Error('Failed to fetch metadata');
+      const metaData = await metaRes.json();
+      
+      // 2. Set Image URL (Full Image)
+      const imageUrl = `${SERVER_URL}/image?url=${encodeURIComponent(tiffUrl)}&channel=${selectedChannel.id}`;
+      
+      console.log('Using Full Image URL:', imageUrl);
+      console.log('Coordinates:', metaData.coordinates);
 
-      const dataUrl = await processTiffData(image, selectedChannel.id);
+      map.addSource('forecast-source', {
+        type: 'image',
+        url: imageUrl,
+        coordinates: metaData.coordinates
+      });
 
-      // MapLibre image source expects coordinates in order: [top-left, top-right, bottom-right, bottom-left]
-      // For a standard north-up GeoTIFF:
-      // - Canvas pixel (0,0) = top-left of image = northwest corner = [minX, maxY]
-      // - Canvas pixel (width,0) = top-right = northeast = [maxX, maxY]
-      // - Canvas pixel (width,height) = bottom-right = southeast = [maxX, minY]
-      // - Canvas pixel (0,height) = bottom-left = southwest = [minX, minY]
-      const coordinates: [[number, number], [number, number], [number, number], [number, number]] = [
-        [minX, maxY], // TL (northwest)
-        [maxX, maxY], // TR (northeast)
-        [maxX, minY], // BR (southeast)
-        [minX, minY]  // BL (southwest)
-      ];
-       
-      const sourceId = 'forecast-source';
-      const layerId = 'forecast-layer';
+      map.addLayer({
+        id: 'forecast-layer',
+        type: 'raster',
+        source: 'forecast-source',
+        paint: {
+          'raster-opacity': selectedChannel.id.startsWith('sat_') ? 0.8 : 0.8,
+          'raster-fade-duration': 0
+        }
+      });
 
-      const source = map.getSource(sourceId);
-      const opacity = selectedChannel.id.startsWith('sat_') ? 0.8 : 0.8;
-      if (source) {
-        source.updateImage({ url: dataUrl, coordinates });
-        map.setPaintProperty(layerId, 'raster-opacity', opacity);
-      } else {
-        map.addSource(sourceId, {
-          type: 'image',
-          url: dataUrl,
-          coordinates: coordinates
-        });
-
-        map.addLayer({
-          id: layerId,
-          type: 'raster',
-          source: sourceId,
-          paint: {
-            'raster-opacity': opacity,
-            'raster-fade-duration': 0
-          }
-        });
-      }
     } catch (error) {
       console.error('Error updating layer:', error);
-      // Optional: Show user feedback
     } finally {
       setIsLoading(false);
     }
   };
 
-  const processTiffData = async (image: any, channelId: string): Promise<string> => {
-    const rasters = await image.readRasters(); // returns list of typed arrays
-    const data: any = rasters[0]; // Assuming single band for these files
-    const width = image.getWidth();
-    const height = image.getHeight();
-    
-    // Check if we need to flip the image vertically
-    // GeoTIFF stores pixel data starting from the origin defined in the geotransform
-    // Standard north-up GeoTIFFs have:
-    // - Origin at top-left (northwest corner)
-    // - Negative Y resolution (pixels go south as row index increases)
-    // This matches HTML Canvas which also starts at top-left
-    // 
-    // However, some GeoTIFFs (especially from certain tools) may have:
-    // - Origin at bottom-left (southwest corner)  
-    // - Positive Y resolution (pixels go north as row index increases)
-    // These need to be flipped to display correctly on Canvas
-    const resolution = image.getResolution();
-    const [scaleX, scaleY] = resolution;
-    
-    // Get the origin point to understand the data orientation
-    const origin = image.getOrigin();
-    const bbox = image.getBoundingBox();
-    
-    // If scaleY is positive, origin is at bottom-left, data goes bottom-to-top
-    // Canvas expects top-to-bottom, so we need to flip
-    // 
-    // For standard north-up GeoTIFFs (negative scaleY), data is already top-to-bottom
-    // which matches Canvas expectations, so no flip needed.
-    const needsVerticalFlip = scaleY > 0;
-    
-    console.log('TIFF Resolution:', resolution);
-    console.log('TIFF Origin:', origin);
-    console.log('TIFF BBox:', bbox);
-    console.log('needsVerticalFlip:', needsVerticalFlip);
-    
-    // Try to get NoData value from TIFF metadata
-    const fileDirectory = image.getFileDirectory();
-    let noDataValue: number | null = null;
-    
-    // Check standard GDAL_NODATA tag (42113) if available or parsed
-    if (fileDirectory.GDAL_NODATA) {
-      const cleanStr = String(fileDirectory.GDAL_NODATA).replace(/\0/g, '').trim();
-      if (cleanStr.toLowerCase() === 'nan') {
-        noDataValue = NaN;
-      } else {
-        noDataValue = parseFloat(cleanStr);
-      }
-    }
-    
-    // Also check GDALMetadata for nodata
-    if (noDataValue === null && fileDirectory.GDALMetadata) {
-      const metaStr = String(fileDirectory.GDALMetadata);
-      const noDataMatch = metaStr.match(/<Item name="NODATA">([^<]+)<\/Item>/i);
-      if (noDataMatch) {
-        const val = noDataMatch[1].trim();
-        noDataValue = val.toLowerCase() === 'nan' ? NaN : parseFloat(val);
-      }
-    }
-    
-    console.log('TIFF Processing - Channel:', channelId);
-    console.log('TIFF FileDirectory keys:', Object.keys(fileDirectory));
-    console.log('Detected NoData value:', noDataValue);
-    console.log('Data type:', data.constructor.name);
-    console.log('Image dimensions:', width, 'x', height);
-    console.log('Data length:', data.length, 'Expected:', width * height);
-    console.log('Data length matches:', data.length === width * height);
-    console.log('First 10 pixel values:', Array.from(data.slice(0, 10)));
-    console.log('Last 10 pixel values:', Array.from(data.slice(-10)));
-    
-    // Check TIFF structure (tiles vs strips)
-    console.log('TIFF TileWidth:', fileDirectory.TileWidth);
-    console.log('TIFF TileLength:', fileDirectory.TileLength);
-    console.log('TIFF RowsPerStrip:', fileDirectory.RowsPerStrip);
-    console.log('TIFF SamplesPerPixel:', fileDirectory.SamplesPerPixel);
-    console.log('TIFF PlanarConfiguration:', fileDirectory.PlanarConfiguration);
-    
-    // Count NA values to understand data distribution
-    let naCount = 0;
-    let validCount = 0;
-    for (let i = 0; i < data.length; i++) {
-      if (isNaN(data[i]) || (noDataValue !== null && !isNaN(noDataValue) && data[i] === noDataValue)) {
-        naCount++;
-      } else {
-        validCount++;
-      }
-    }
-    console.log('NA pixel count:', naCount, 'Valid pixel count:', validCount, 'NA percentage:', (naCount / data.length * 100).toFixed(2) + '%');
-    
-    // Check NA distribution by row (first few and last few rows)
-    const checkRowNA = (rowIdx: number) => {
-      const start = rowIdx * width;
-      let rowNA = 0;
-      for (let c = 0; c < width; c++) {
-        const val = data[start + c];
-        if (isNaN(val) || (noDataValue !== null && !isNaN(noDataValue) && val === noDataValue)) rowNA++;
-      }
-      return rowNA;
-    };
-    console.log('NA count in row 0 (top):', checkRowNA(0));
-    console.log('NA count in row', height - 1, '(bottom):', checkRowNA(height - 1));
-    console.log('NA count in middle row', Math.floor(height / 2), ':', checkRowNA(Math.floor(height / 2)));
-
-    // Normalization logic with fixed ranges for consistency across timesteps
-    const RANGES: { [key: string]: { min: number, max: number } } = {
-      'lightning': { min: 0, max: 20 },
-      'sat_ch0': { min: -2, max: 15 },
-      'sat_ch1': { min: -3, max: 120 },
-    };
-
-    const rangeConfig = RANGES[channelId] || { min: 0, max: 1 };
-    const { min, max } = rangeConfig;
-    const range = max - min;
-    const rgba = new Uint8ClampedArray(width * height * 4);
-
-    // --- REPROJECTION LOGIC ---
-    // Reproject WGS84 (Linear Lat) to Web Mercator (Linear Y) vertically
-    const [minLon, minLat, maxLon, maxLat] = bbox;
-    
-    const latRad = (lat: number) => lat * Math.PI / 180;
-    const mercY = (lat: number) => Math.log(Math.tan(latRad(lat) / 2 + Math.PI / 4));
-    
-    const yMaxMerc = mercY(maxLat);
-    const yMinMerc = mercY(minLat);
-    const mercHeight = yMaxMerc - yMinMerc;
-
-    for (let y = 0; y < height; y++) {
-      // Calculate which Latitude this target row corresponds to
-      const v = y / height;
-      const currentMercY = yMaxMerc - v * mercHeight;
-      const currentLat = (2 * Math.atan(Math.exp(currentMercY)) - Math.PI / 2) * 180 / Math.PI;
-      
-      // Find corresponding row in source data (Linear Latitude)
-      // sourceV goes 0 (Top/MaxLat) to 1 (Bottom/MinLat)
-      const sourceV = (maxLat - currentLat) / (maxLat - minLat);
-      
-      let sourceRow = Math.floor(sourceV * height);
-      sourceRow = Math.max(0, Math.min(height - 1, sourceRow));
-      
-      // Handle vertical flip if source is bottom-up
-      if (needsVerticalFlip) {
-        sourceRow = height - 1 - sourceRow;
-      }
-      
-      const sourceRowOffset = sourceRow * width;
-      const targetRowOffset = y * width * 4;
-
-      for (let x = 0; x < width; x++) {
-        const val = data[sourceRowOffset + x];
-        const idx = targetRowOffset + x * 4;
-        
-        // Check for NoData or NaN
-        const isNoData = isNaN(val) || (noDataValue !== null && !isNaN(noDataValue) && val === noDataValue);
-        
-        if (isNoData) {
-          rgba[idx] = 0; rgba[idx + 1] = 0; rgba[idx + 2] = 0; rgba[idx + 3] = 0;
-          continue;
-        }
-        
-        // Clamp value to fixed range then normalize
-        const clampedVal = Math.max(min, Math.min(max, val));
-        const normalized = range === 0 ? 0 : (clampedVal - min) / range;
-        const pixelVal = Math.floor(normalized * 255);
-        
-        // Color Mapping
-        if (channelId === 'lightning') {
-          // Lightning: Transparent to Yellow/Red
-          if (pixelVal < 5) { // Threshold for transparency
-              rgba[idx] = 0; rgba[idx + 1] = 0; rgba[idx + 2] = 0; rgba[idx + 3] = 0;
-          } else {
-              // Heatmap: Yellow (255, 255, 0) to Red (255, 0, 0)
-              const p = pixelVal / 255;
-              rgba[idx] = 255; // R
-              rgba[idx + 1] = Math.floor(255 * (1 - p)); // G
-              rgba[idx + 2] = 0; // B
-              rgba[idx + 3] = Math.floor(Math.min(255, 100 + pixelVal * 2));
-          }
-        } else {
-          // Satellite: Grayscale
-          rgba[idx] = pixelVal;
-          rgba[idx + 1] = pixelVal;
-          rgba[idx + 2] = pixelVal;
-          rgba[idx + 3] = 255;
-        }
-      }
-    }
-
-    // Create Canvas to convert to Data URL
-    const canvas = document.createElement('canvas');
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) throw new Error('Could not get 2d context');
-    
-    const imageData = new ImageData(rgba, width, height);
-    ctx.putImageData(imageData, 0, 0);
-    
-    // Debug: Log canvas dimensions and check if image looks correct
-    console.log('Canvas dimensions:', canvas.width, 'x', canvas.height);
-    
-    // Debug: Open canvas image in new tab to verify it looks correct
-    // Uncomment the next line to see the raw processed image:
-    // window.open(canvas.toDataURL(), '_blank');
-    
-    return canvas.toDataURL();
-  };
-
   return (
     <View style={styles.page}>
+
       {/* Navbar */}
       <View style={styles.navbar}>
         <Image 
