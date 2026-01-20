@@ -17,3 +17,10 @@ For future updates (after the first one is live), you can use:
 ```bash
 npx eas-cli build --platform android --auto-submit
 ```
+
+## Local build
+```bash
+export ANDROID_HOME=/home/adrienbufort/Android/Sdk
+export PATH=$PATH:$ANDROID_HOME/platform-tools
+npx eas-cli build --platform android --local --profile production
+```

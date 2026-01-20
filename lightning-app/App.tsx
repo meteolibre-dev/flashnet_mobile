@@ -1,115 +1,179 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { StyleSheet, View, Text, TouchableOpacity, ScrollView, Platform, StatusBar, Image } from 'react-native';
+import { StyleSheet, View, Text, TouchableOpacity, ScrollView, Platform, StatusBar, Image, TextInput, Dimensions } from 'react-native';
 import MapLibreGL from '@maplibre/maplibre-react-native';
+import * as GeoTIFF from 'geotiff';
+import { Buffer } from 'buffer';
+
+// Polyfill Buffer for GeoTIFF if needed
+if (typeof global.Buffer === 'undefined') {
+  global.Buffer = Buffer;
+}
 
 // Set access token if needed (null for MapLibre/OpenStreetMap)
 MapLibreGL.setAccessToken(null);
 
 // --- Configuration ---
-const COORDINATES = [
-  [-81.2778265, 77.3564187], // TL
-  [81.2904694, 77.3564187],  // TR
-  [81.2904694, -77.3690833], // BR
-  [-81.2778265, -77.3690833] // BL
+const REGION = {
+  west: -10.0,
+  north: 65.0,
+  east: 33.0,
+  south: 33.0,
+};
+
+const BASE_BUCKET_URL = "https://storage.googleapis.com/inference_result/forecasts";
+
+const CHANNELS = [
+  { id: 'lightning', label: 'Lightning' },
+  { id: 'sat_ch0', label: 'VIS (Ch0)' },
+  { id: 'sat_ch1', label: 'IR (Ch1)' },
 ];
 
-// Simplified Dark Style derived from demotiles
-const MAP_STYLE = {
-  "version": 8,
-  "name": "Simplified Dark",
-  "sources": {
-    "maplibre": {
-      "type": "vector",
-      "url": "https://demotiles.maplibre.org/tiles/tiles.json"
-    }
-  },
-  "layers": [
-    {
-      "id": "background",
-      "type": "background",
-      "paint": {
-        "background-color": "#000000"
-      }
-    },
-    {
-      "id": "coastline",
-      "type": "line",
-      "source": "maplibre",
-      "source-layer": "countries",
-      "paint": {
-        "line-color": "#333333",
-        "line-width": 1
-      }
-    },
-    {
-      "id": "countries-boundary",
-      "type": "line",
-      "source": "maplibre",
-      "source-layer": "countries",
-      "paint": {
-        "line-color": "#FFFFFF",
-        "line-width": 1,
-        "line-opacity": 0.5
-      }
-    },
-    {
-      "id": "countries-label",
-      "type": "symbol",
-      "source": "maplibre",
-      "source-layer": "centroids",
-      "minzoom": 2,
-      "layout": {
-        "text-field": "{NAME}",
-        "text-font": ["Open Sans Semibold"],
-        "text-transform": "uppercase",
-        "text-size": 12
-      },
-      "paint": {
-        "text-color": "#FFFFFF",
-        "text-halo-color": "#000000",
-        "text-halo-width": 1
-      }
-    }
-  ]
-};
-
-// --- Local Data Files ---
-// Hardcoded requires as requested
-const LOCAL_FILES: { [key: string]: any } = {
-  '20250725180000': require('./assets/data/forecast_20250725180000_lightning.png'),
-  '20250725181000': require('./assets/data/forecast_20250725181000_lightning.png'),
-  '20250725182000': require('./assets/data/forecast_20250725182000_lightning.png'),
-};
-
 interface Timestep {
-  id: string;
+  dateFolder: string;
+  filenameTime: string;
   label: string;
-  imageSource: any;
+  fullDate: Date;
 }
 
-const TIMESTEPS: Timestep[] = Object.keys(LOCAL_FILES).sort().map(key => {
-  const hour = key.substring(8, 10);
-  const minute = key.substring(10, 12);
-  return {
-    id: key,
-    label: `${hour}:${minute}`,
-    imageSource: LOCAL_FILES[key]
-  };
-});
+// --- BMP Generation Helper ---
+// Creates an uncompressed BMP image from RGBA data
+const createBmpUri = (width: number, height: number, rgbaData: Uint8Array): string => {
+  const headerSize = 54; // 14 (file header) + 40 (info header)
+  const fileSize = headerSize + rgbaData.length;
+  const buffer = new Uint8Array(fileSize);
+  const view = new DataView(buffer.buffer);
+
+  // Bitmap File Header
+  view.setUint16(0, 0x424D, false); // "BM" signature
+  view.setUint32(2, fileSize, true); // File size
+  view.setUint32(6, 0, true); // Reserved
+  view.setUint32(10, headerSize, true); // Offset to pixel data
+
+  // DIB Header (BITMAPINFOHEADER)
+  view.setUint32(14, 40, true); // Header size
+  view.setInt32(18, width, true); // Width
+  view.setInt32(22, -height, true); // Height (negative for top-down)
+  view.setUint16(26, 1, true); // Planes
+  view.setUint16(28, 32, true); // Bits per pixel (32 for RGBA)
+  view.setUint32(30, 0, true); // Compression (BI_RGB - no compression)
+  view.setUint32(34, rgbaData.length, true); // Image size
+  view.setInt32(38, 2835, true); // X pixels per meter (approx 72 DPI)
+  view.setInt32(42, 2835, true); // Y pixels per meter
+  view.setUint32(46, 0, true); // Colors used
+  view.setUint32(50, 0, true); // Important colors
+
+  // Pixel Data
+  // BMP stores color as BGRA, but our input is RGBA. We need to swap R and B.
+  // Also, MapLibre might expect RGBA or BGRA depending on implementation, but standard BMP is BGRA.
+  // Let's copy and swap.
+  let ptr = headerSize;
+  for (let i = 0; i < rgbaData.length; i += 4) {
+    buffer[ptr] = rgbaData[i + 2];     // B
+    buffer[ptr + 1] = rgbaData[i + 1]; // G
+    buffer[ptr + 2] = rgbaData[i];     // R
+    buffer[ptr + 3] = rgbaData[i + 3]; // A
+    ptr += 4;
+  }
+
+  // Convert to Base64
+  const binary = String.fromCharCode(...buffer);
+  const base64 = global.btoa ? global.btoa(binary) : Buffer.from(buffer).toString('base64');
+  return `data:image/bmp;base64,${base64}`;
+};
+
+const scanAvailableTimesteps = async (maxTimesteps: number = 18): Promise<Timestep[]> => {
+  const availableTimesteps: Timestep[] = [];
+  const now = new Date();
+  
+  const datesToCheck = [];
+  for (let i = 0; i < 2; i++) {
+    const d = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
+    datesToCheck.push(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`);
+  }
+
+  for (const dateFolder of datesToCheck) {
+    const listUrl = `https://storage.googleapis.com/storage/v1/b/inference_result/o?prefix=forecasts/${dateFolder}/`;
+    try {
+      const response = await fetch(listUrl);
+      if (response.ok) {
+        const data = await response.json();
+        if (data.items) {
+          for (const item of data.items) {
+            const match = item.name.match(/forecast_(\d{12})_lightning\.tiff$/);
+            if (match) {
+              const filenameTime = match[1];
+              const year = filenameTime.substring(0, 4);
+              const month = filenameTime.substring(4, 6);
+              const day = filenameTime.substring(6, 8);
+              const hour = filenameTime.substring(8, 10);
+              const minute = filenameTime.substring(10, 12);
+              
+              const fullDate = new Date(`${year}-${month}-${day}T${hour}:${minute}:00Z`);
+              
+              if (!availableTimesteps.find(s => s.filenameTime === filenameTime)) {
+                availableTimesteps.push({
+                  dateFolder,
+                  filenameTime,
+                  label: `${hour}:${minute}`,
+                  fullDate
+                });
+              }
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.error(`Error listing files for ${dateFolder}:`, error);
+    }
+  }
+  
+  return availableTimesteps.sort((a, b) => a.fullDate.getTime() - b.fullDate.getTime()).slice(-maxTimesteps);
+};
 
 export default function App() {
-  const [selectedStep, setSelectedStep] = useState<Timestep>(TIMESTEPS[0]);
+  const [timesteps, setTimesteps] = useState<Timestep[]>([]);
+  const [selectedStep, setSelectedStep] = useState<Timestep | null>(null);
+  const [selectedChannel, setSelectedChannel] = useState(CHANNELS[0]);
   const [isPlaying, setIsPlaying] = useState(false);
   const playInterval = useRef<any>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isScanning, setIsScanning] = useState(true);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<any[]>([]);
+  const [showSearchResults, setShowSearchResults] = useState(false);
+  const [layerUrl, setLayerUrl] = useState<string | null>(null);
+  const [layerCoordinates, setLayerCoordinates] = useState<any>(null);
+
+  const cameraRef = useRef<MapLibreGL.Camera>(null);
+
+  // Initialize Data
+  useEffect(() => {
+    const initTimesteps = async () => {
+      setIsScanning(true);
+      try {
+        const available = await scanAvailableTimesteps(18);
+        setTimesteps(available);
+        if (available.length > 0) {
+          setSelectedStep(available[available.length - 1]);
+        }
+      } catch (error) {
+        console.error('Error scanning timesteps:', error);
+      } finally {
+        setIsScanning(false);
+      }
+    };
+    initTimesteps();
+  }, []);
 
   // Playback Logic
   useEffect(() => {
-    if (isPlaying) {
+    if (isPlaying && timesteps.length > 0) {
       playInterval.current = setInterval(() => {
         setSelectedStep((prevStep) => {
-          const currentIndex = TIMESTEPS.findIndex(s => s.id === prevStep.id);
-          const nextIndex = (currentIndex + 1) % TIMESTEPS.length;
-          return TIMESTEPS[nextIndex];
+          if (!prevStep) return timesteps[0];
+          const currentIndex = timesteps.findIndex(s => s.filenameTime === prevStep.filenameTime);
+          const nextIndex = (currentIndex + 1) % timesteps.length;
+          return timesteps[nextIndex];
         });
       }, 1000);
     } else {
@@ -118,7 +182,199 @@ export default function App() {
     return () => {
       if (playInterval.current) clearInterval(playInterval.current);
     };
-  }, [isPlaying]);
+  }, [isPlaying, timesteps]);
+
+  // Search Logic
+  const searchLocation = async (query: string) => {
+    if (!query.trim()) {
+      setSearchResults([]);
+      setShowSearchResults(false);
+      return;
+    }
+
+    try {
+      const response = await fetch(
+        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=5`,
+        { headers: { 'User-Agent': 'FlashNetMobile/1.0' } }
+      );
+      const data = await response.json();
+      setSearchResults(data);
+      setShowSearchResults(true);
+    } catch (error) {
+      console.error('Search error:', error);
+    }
+  };
+
+  const handleSearchChange = (text: string) => {
+    setSearchQuery(text);
+    if (text.length >= 2) {
+      const debounce = setTimeout(() => searchLocation(text), 300);
+      return () => clearTimeout(debounce);
+    } else {
+      setSearchResults([]);
+      setShowSearchResults(false);
+    }
+  };
+
+  const selectLocation = (result: any) => {
+    const lat = parseFloat(result.lat);
+    const lon = parseFloat(result.lon);
+    
+    if (cameraRef.current) {
+        cameraRef.current.setCamera({
+            centerCoordinate: [lon, lat],
+            zoomLevel: 7,
+            animationDuration: 1000,
+        });
+    }
+
+    setSearchQuery(result.display_name.split(',')[0]);
+    setShowSearchResults(false);
+  };
+
+  // Update Layer Logic
+  useEffect(() => {
+    const updateLayer = async () => {
+        if (!selectedStep) return;
+        
+        setIsLoading(true);
+        try {
+          const url = `${BASE_BUCKET_URL}/${selectedStep.dateFolder}/forecast_${selectedStep.filenameTime}_${selectedChannel.id}.tiff`;
+          console.log('Fetching:', url);
+    
+          const response = await fetch(url);
+          if (!response.ok) throw new Error(`Failed to fetch TIFF: ${response.statusText}`);
+          
+          const arrayBuffer = await response.arrayBuffer();
+          const tiff = await GeoTIFF.fromArrayBuffer(arrayBuffer);
+          const image = await tiff.getImage();
+          const bbox = image.getBoundingBox();
+          const [minX, minY, maxX, maxY] = bbox;
+    
+          // Process TIFF Data
+          const rasters = await image.readRasters();
+          const data: any = rasters[0];
+          const width = image.getWidth();
+          const height = image.getHeight();
+          const resolution = image.getResolution();
+          const [scaleX, scaleY] = resolution;
+          const needsVerticalFlip = scaleY > 0;
+
+          // NoData handling
+          const fileDirectory = image.getFileDirectory();
+          let noDataValue = null;
+          if (fileDirectory.GDAL_NODATA) {
+             const cleanStr = String(fileDirectory.GDAL_NODATA).replace(/\0/g, '').trim();
+             noDataValue = cleanStr.toLowerCase() === 'nan' ? NaN : parseFloat(cleanStr);
+          }
+
+          // Ranges
+          const RANGES: { [key: string]: { min: number, max: number } } = {
+            'lightning': { min: 0, max: 20 },
+            'sat_ch0': { min: -2, max: 15 },
+            'sat_ch1': { min: -3, max: 120 },
+          };
+          const { min, max } = RANGES[selectedChannel.id] || { min: 0, max: 1 };
+          const range = max - min;
+          const rgba = new Uint8ClampedArray(width * height * 4);
+
+          // Reprojection logic (Simplified for performance, similar to Web)
+          // Note: In a real native app, consider doing this in C++ or using a shader if performance is bad.
+          // For now, we stick to JS logic matching the web version.
+          
+          const latRad = (lat: number) => lat * Math.PI / 180;
+          const mercY = (lat: number) => Math.log(Math.tan(latRad(lat) / 2 + Math.PI / 4));
+          const yMaxMerc = mercY(maxY);
+          const yMinMerc = mercY(minY);
+          const mercHeight = yMaxMerc - yMinMerc;
+
+          for (let y = 0; y < height; y++) {
+            const v = y / height;
+            const currentMercY = yMaxMerc - v * mercHeight;
+            const currentLat = (2 * Math.atan(Math.exp(currentMercY)) - Math.PI / 2) * 180 / Math.PI;
+            const sourceV = (maxY - currentLat) / (maxY - minY);
+            let sourceRow = Math.floor(sourceV * height);
+            sourceRow = Math.max(0, Math.min(height - 1, sourceRow));
+            if (needsVerticalFlip) sourceRow = height - 1 - sourceRow;
+
+            const sourceRowOffset = sourceRow * width;
+            const targetRowOffset = y * width * 4;
+
+            for (let x = 0; x < width; x++) {
+                const val = data[sourceRowOffset + x];
+                const idx = targetRowOffset + x * 4;
+                const isNoData = isNaN(val) || (noDataValue !== null && !isNaN(noDataValue) && val === noDataValue);
+
+                if (isNoData) {
+                    rgba[idx] = 0; rgba[idx+1] = 0; rgba[idx+2] = 0; rgba[idx+3] = 0;
+                    continue;
+                }
+
+                const clampedVal = Math.max(min, Math.min(max, val));
+                const normalized = range === 0 ? 0 : (clampedVal - min) / range;
+                const pixelVal = Math.floor(normalized * 255);
+
+                if (selectedChannel.id === 'lightning') {
+                    if (pixelVal < 5) {
+                        rgba[idx] = 0; rgba[idx+1] = 0; rgba[idx+2] = 0; rgba[idx+3] = 0;
+                    } else {
+                        const p = pixelVal / 255;
+                        rgba[idx] = 255;
+                        rgba[idx+1] = Math.floor(255 * (1 - p));
+                        rgba[idx+2] = 0;
+                        rgba[idx+3] = Math.floor(Math.min(255, 100 + pixelVal * 2));
+                    }
+                } else {
+                    rgba[idx] = pixelVal; rgba[idx+1] = pixelVal; rgba[idx+2] = pixelVal; rgba[idx+3] = 255;
+                }
+            }
+          }
+
+          // Generate BMP
+          const bmpUri = createBmpUri(width, height, rgba);
+          setLayerUrl(bmpUri);
+          
+          // Coordinates: [TL, TR, BR, BL]
+          setLayerCoordinates([
+            [minX, maxY],
+            [maxX, maxY],
+            [maxX, minY],
+            [minX, minY]
+          ]);
+
+        } catch (error) {
+            console.error('Error updating layer:', error);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    updateLayer();
+  }, [selectedStep, selectedChannel]);
+
+
+  // Map Style - Using OpenStreetMap Raster to match Web
+  const MAP_STYLE = {
+    "version": 8,
+    "name": "OSM",
+    "sources": {
+      "osm": {
+        "type": "raster",
+        "tiles": ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+        "tileSize": 256,
+        "attribution": "© OpenStreetMap contributors"
+      }
+    },
+    "layers": [
+      {
+        "id": "osm",
+        "type": "raster",
+        "source": "osm",
+        "minzoom": 0,
+        "maxzoom": 19
+      }
+    ]
+  };
 
   return (
     <View style={styles.page}>
@@ -126,7 +382,39 @@ export default function App() {
       
       {/* Navbar */}
       <View style={styles.navbar}>
+        <Image 
+            source={require('./assets/icon.png')} // Assuming icon exists, or use a placeholder
+            style={styles.logo} 
+            resizeMode="contain" 
+        />
         <Text style={styles.title}>FlashNet</Text>
+      </View>
+
+      {/* Search Bar */}
+      <View style={styles.searchContainer}>
+        <TextInput
+          style={styles.searchInput}
+          placeholder="Search location..."
+          placeholderTextColor="#888"
+          value={searchQuery}
+          onChangeText={handleSearchChange}
+          onFocus={() => searchResults.length > 0 && setShowSearchResults(true)}
+        />
+        {showSearchResults && searchResults.length > 0 && (
+          <View style={styles.searchResults}>
+            {searchResults.map((result, index) => (
+              <TouchableOpacity
+                key={index}
+                style={styles.searchResultItem}
+                onPress={() => selectLocation(result)}
+              >
+                <Text style={styles.searchResultText} numberOfLines={1}>
+                  {result.display_name}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        )}
       </View>
 
       {/* Map */}
@@ -137,23 +425,24 @@ export default function App() {
         attributionEnabled={false}
       >
         <MapLibreGL.Camera
+          ref={cameraRef}
           defaultSettings={{
-            centerCoordinate: [0, 0],
-            zoomLevel: 1
+            centerCoordinate: [(REGION.west + REGION.east) / 2, (REGION.north + REGION.south) / 2],
+            zoomLevel: 2
           }}
         />
 
-        {/* Lightning Overlay */}
-        {selectedStep && (
+        {/* Overlay */}
+        {layerUrl && layerCoordinates && (
           <MapLibreGL.ImageSource
-            id="lightning-source"
-            coordinates={COORDINATES}
-            url={Image.resolveAssetSource(selectedStep.imageSource).uri}
+            id="forecast-source"
+            coordinates={layerCoordinates}
+            url={layerUrl}
           >
             <MapLibreGL.RasterLayer
-              id="lightning-layer"
+              id="forecast-layer"
               style={{
-                rasterOpacity: 0.8,
+                rasterOpacity: selectedChannel.id.startsWith('sat_') ? 0.8 : 0.8,
                 rasterFadeDuration: 0
               }}
             />
@@ -161,6 +450,12 @@ export default function App() {
         )}
       </MapLibreGL.MapView>
       
+      {isLoading && (
+        <View style={styles.loader}>
+          <Text style={styles.loaderText}>Loading...</Text>
+        </View>
+      )}
+
       {/* Controls */}
       <View style={styles.controlsContainer}>
         <View style={styles.controlsRow}>
@@ -171,25 +466,45 @@ export default function App() {
               <Text style={styles.playBtnText}>{isPlaying ? "II" : "▶"}</Text>
             </TouchableOpacity>
 
-             <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              style={styles.timeScroll}
-              contentContainerStyle={styles.scrollContent}
-            >
-              {TIMESTEPS.map((step) => (
+             <View style={styles.channelRow}>
+              {CHANNELS.map((ch) => (
                 <TouchableOpacity
-                  key={step.id}
-                  onPress={() => setSelectedStep(step)}
-                  style={[styles.timeBtn, selectedStep.id === step.id && styles.selectedBtn]}
+                  key={ch.id}
+                  onPress={() => setSelectedChannel(ch)}
+                  style={[styles.channelBtn, selectedChannel.id === ch.id && styles.selectedBtn]}
                 >
-                  <Text style={[styles.btnText, selectedStep.id === step.id && styles.selectedBtnText]}>
-                    {step.label}
+                  <Text style={[styles.btnText, selectedChannel.id === ch.id && styles.selectedBtnText]}>
+                    {ch.label}
                   </Text>
                 </TouchableOpacity>
               ))}
-            </ScrollView>
+            </View>
         </View>
+        
+        <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            style={styles.timeScroll}
+            contentContainerStyle={styles.scrollContent}
+        >
+            {isScanning ? (
+                <Text style={styles.scanningText}>Scanning...</Text>
+            ) : timesteps.length === 0 ? (
+                <Text style={styles.errorText}>No timesteps</Text>
+            ) : (
+                timesteps.map((step) => (
+                <TouchableOpacity
+                    key={step.filenameTime}
+                    onPress={() => setSelectedStep(step)}
+                    style={[styles.timeBtn, selectedStep?.filenameTime === step.filenameTime && styles.selectedBtn]}
+                >
+                    <Text style={[styles.btnText, selectedStep?.filenameTime === step.filenameTime && styles.selectedBtnText]}>
+                    {step.label}
+                    </Text>
+                </TouchableOpacity>
+                ))
+            )}
+        </ScrollView>
       </View>
     </View>
   );
@@ -211,6 +526,11 @@ const styles = StyleSheet.create({
     zIndex: 10,
     marginTop: Platform.OS === 'android' ? 25 : 0
   },
+  logo: {
+    width: 30,
+    height: 30,
+    marginRight: 10,
+  },
   title: {
     color: '#00FFFF',
     fontSize: 20,
@@ -220,12 +540,72 @@ const styles = StyleSheet.create({
   map: {
     flex: 1,
   },
+  searchContainer: {
+    position: 'absolute',
+    top: Platform.OS === 'android' ? 95 : 70, // Adjust for status bar/navbar
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+    zIndex: 1500,
+  },
+  searchInput: {
+    width: '60%',
+    backgroundColor: 'white',
+    borderRadius: 25,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    color: '#333',
+    fontSize: 14,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 5,
+  },
+  searchResults: {
+    width: '60%',
+    marginTop: 4,
+    backgroundColor: 'white',
+    borderRadius: 12,
+    maxHeight: 200,
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 5,
+  },
+  searchResultItem: {
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#eee',
+  },
+  searchResultText: {
+    color: '#333',
+    fontSize: 14,
+  },
+  loader: {
+    position: 'absolute',
+    top: '50%',
+    left: '50%',
+    transform: [{ translateX: -50 }, { translateY: -50 }],
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    padding: 15,
+    borderRadius: 10,
+    zIndex: 2000,
+  },
+  loaderText: {
+    color: 'white',
+    fontWeight: 'bold',
+  },
   controlsContainer: {
     position: 'absolute',
     bottom: 30,
     left: 10,
     right: 10,
     zIndex: 100,
+    alignItems: 'center',
   },
   controlsRow: {
     flexDirection: 'row',
@@ -234,7 +614,8 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     padding: 10,
     borderWidth: 1,
-    borderColor: '#333'
+    borderColor: '#333',
+    marginBottom: 10,
   },
   playBtn: {
     width: 40,
@@ -253,8 +634,20 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: 'bold',
   },
+  channelRow: {
+    flexDirection: 'row',
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    borderRadius: 20,
+    padding: 2,
+  },
+  channelBtn: {
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 18,
+  },
   timeScroll: {
-    flex: 1,
+    maxHeight: 40,
+    width: '100%',
   },
   scrollContent: {
     alignItems: 'center',
@@ -276,5 +669,13 @@ const styles = StyleSheet.create({
   selectedBtnText: {
     color: 'white',
     fontWeight: 'bold',
+  },
+  scanningText: {
+    color: '#00FFFF',
+    padding: 10,
+  },
+  errorText: {
+    color: '#FF3B30',
+    padding: 10,
   }
 });
