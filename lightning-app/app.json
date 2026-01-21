@@ -2,13 +2,13 @@
   "expo": {
     "name": "FlashNet",
     "slug": "flashnet-y50onk",
-    "version": "1.4.0",
+    "version": "1.6.0",
     "orientation": "portrait",
     "icon": "./public/logo_small.png",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
     "splash": {
-      "image": "./public/logo_original.png",
+      "image": "./assets/icon.png",
       "resizeMode": "contain",
       "backgroundColor": "#000000"
     },
@@ -18,7 +18,7 @@
     },
     "android": {
       "package": "dev.meteolibre.lightningapp",
-      "versionCode": 13,
+      "versionCode": 15,
       "permissions": [
         "INTERNET",
         "ACCESS_COARSE_LOCATION",

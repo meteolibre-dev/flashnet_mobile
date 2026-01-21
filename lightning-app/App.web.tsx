@@ -446,12 +446,12 @@ export default function App() {
             { transform: [{ translateY: slideAnim }] }
           ]}
         >
-          <Image 
-            source={{ uri: '/logo.png' }} 
-            style={styles.splashLogo} 
-            resizeMode="contain" 
+          <Image
+            source={require('./assets/icon.png')}
+            style={styles.splashLogo}
+            resizeMode="contain"
           />
-          <Text style={styles.splashTitle}>FlashNet</Text>
+          <Text style={styles.splashTitle}>by meteolibre</Text>
         </Animated.View>
       )}
     </View>
