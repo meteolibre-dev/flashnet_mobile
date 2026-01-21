@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, useMemo } from 'react';
-import { Platform, StyleSheet, View, Text, TouchableOpacity, ScrollView, Image, TextInput, Animated, Dimensions, Easing } from 'react-native';
+import { Platform, StyleSheet, View, Text, TouchableOpacity, TextInput, Animated, Dimensions, Easing, Image } from 'react-native';
 import 'maplibre-gl/dist/maplibre-gl.css';
 
 // --- Configuration ---
@@ -11,7 +11,10 @@ const REGION = {
 };
 
 const BASE_BUCKET_URL = "https://storage.googleapis.com/inference_result/forecasts";
-const SERVER_URL = "http://localhost:3000"; // Web defaults to localhost
+// In development: use local server, in production: use Cloud Run endpoint
+const SERVER_URL = __DEV__
+  ? "http://localhost:3000"
+  : "https://lightning-server-935480850831.europe-west1.run.app";
 
 const CHANNELS = [
   { id: 'lightning', label: 'Lightning' },
@@ -145,7 +148,8 @@ export default function App() {
             ]
           },
           center: [(REGION.west + REGION.east) / 2, (REGION.north + REGION.south) / 2],
-          zoom: 3
+          zoom: 3,
+          maxBounds: [[REGION.west, REGION.south], [REGION.east, REGION.north]]
         });
 
         mapInstance.current = map;
@@ -153,6 +157,29 @@ export default function App() {
 
         map.on('load', () => {
           updateMapLayer();
+
+          // Get user location and center map
+          if (navigator.geolocation) {
+            navigator.geolocation.getCurrentPosition(
+              (position) => {
+                const { longitude, latitude } = position.coords;
+
+                // Check if user is within Europe bounds
+                if (longitude >= REGION.west && longitude <= REGION.east &&
+                    latitude >= REGION.south && latitude <= REGION.north) {
+                  map.flyTo({
+                    center: [longitude, latitude],
+                    zoom: 6,
+                    duration: 1500
+                  });
+                }
+              },
+              (error) => {
+                console.log('Geolocation error:', error.message);
+              },
+              { enableHighAccuracy: false, timeout: 10000 }
+            );
+          }
         });
       });
     }
@@ -305,16 +332,6 @@ export default function App() {
   return (
     <View style={styles.page}>
 
-      {/* Navbar */}
-      <View style={styles.navbar}>
-        <Image 
-          source={{ uri: '/logo.png' }} 
-          style={styles.logo} 
-          resizeMode="contain" 
-        />
-        <Text style={styles.title}>FlashNet</Text>
-      </View>
-
       {/* Search Bar */}
       <View style={styles.searchContainer} data-search-container>
         <TextInput
@@ -381,31 +398,44 @@ export default function App() {
             </View>
         </View>
 
-        {/* Time Slider */}
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          style={styles.timeScroll}
-          contentContainerStyle={styles.scrollContent}
-        >
+        {/* Timeline Slider */}
+        <View style={styles.timelineContainer}>
           {isScanning ? (
             <Text style={styles.scanningText}>Scanning for available timesteps...</Text>
           ) : timesteps.length === 0 ? (
             <Text style={styles.errorText}>No timesteps available</Text>
           ) : (
-            timesteps.map((step) => (
-              <TouchableOpacity
-                key={step.filenameTime}
-                onPress={() => setSelectedStep(step)}
-                style={[styles.timeBtn, selectedStep?.filenameTime === step.filenameTime && styles.selectedBtn]}
-              >
-                <Text style={[styles.btnText, selectedStep?.filenameTime === step.filenameTime && styles.selectedBtnText]}>
-                  {step.label}
-                </Text>
-              </TouchableOpacity>
-            ))
+            <>
+              <View style={styles.timeLabels}>
+                <Text style={styles.timeLabel}>{timesteps[0]?.label}</Text>
+                <Text style={styles.currentTimeLabel}>{selectedStep?.label}</Text>
+                <Text style={styles.timeLabel}>{timesteps[timesteps.length - 1]?.label}</Text>
+              </View>
+              <input
+                type="range"
+                min={0}
+                max={timesteps.length - 1}
+                step={1}
+                value={timesteps.findIndex(s => s.filenameTime === selectedStep?.filenameTime)}
+                onChange={(e) => setSelectedStep(timesteps[parseInt(e.target.value)])}
+                style={{
+                  width: '100%',
+                  height: 8,
+                  borderRadius: 4,
+                  background: 'linear-gradient(to right, #007AFF 0%, #007AFF ' +
+                    ((timesteps.findIndex(s => s.filenameTime === selectedStep?.filenameTime) / (timesteps.length - 1)) * 100) +
+                    '%, rgba(255,255,255,0.3) ' +
+                    ((timesteps.findIndex(s => s.filenameTime === selectedStep?.filenameTime) / (timesteps.length - 1)) * 100) +
+                    '%, rgba(255,255,255,0.3) 100%)',
+                  cursor: 'pointer',
+                  appearance: 'none' as any,
+                  WebkitAppearance: 'none',
+                  outline: 'none',
+                }}
+              />
+            </>
           )}
-        </ScrollView>
+        </View>
       </View>
 
       {/* Splash Screen */}
@@ -434,27 +464,6 @@ const styles = StyleSheet.create({
     height: '100%',
     backgroundColor: '#000' // Changed to black to match theme
   },
-  navbar: {
-    height: 60,
-    backgroundColor: '#000',
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 15,
-    borderBottomWidth: 1,
-    borderBottomColor: '#00FFFF',
-    zIndex: 2000,
-  },
-  logo: {
-    width: 40,
-    height: 40,
-    marginRight: 10,
-  },
-  title: {
-    color: '#00FFFF', // Cyan text
-    fontSize: 20,
-    fontWeight: 'bold',
-    letterSpacing: 1,
-  },
   map: {
     flex: 1,
     width: '100%',
@@ -476,7 +485,7 @@ const styles = StyleSheet.create({
   },
   searchContainer: {
     position: 'absolute',
-    top: 70,
+    top: 20,
     left: 0,
     right: 0,
     alignItems: 'center',
@@ -565,23 +574,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     borderRadius: 20,
   },
-  timeScroll: {
-    maxHeight: 50,
-    width: '100%',
-  },
-  scrollContent: {
-    paddingHorizontal: 10,
-  },
-  timeBtn: {
-    backgroundColor: 'rgba(255,255,255,0.9)',
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 20,
-    marginRight: 8,
-    borderWidth: 1,
-    borderColor: '#ddd',
-    elevation: 2,
-  },
   selectedBtn: {
     backgroundColor: '#007AFF',
     borderColor: '#007AFF',
@@ -594,17 +586,44 @@ const styles = StyleSheet.create({
   selectedBtnText: {
     color: 'white',
   },
+  timelineContainer: {
+    width: '100%',
+    maxWidth: 500,
+    backgroundColor: 'rgba(0,0,0,0.8)',
+    borderRadius: 15,
+    padding: 15,
+    borderWidth: 1,
+    borderColor: '#333',
+  },
+  timeLabels: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 5,
+    marginBottom: 10,
+  },
+  timeLabel: {
+    color: '#888',
+    fontSize: 12,
+  },
+  currentTimeLabel: {
+    color: '#00FFFF',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
   scanningText: {
     color: '#00FFFF',
     fontSize: 12,
     fontWeight: '600',
     paddingVertical: 10,
+    textAlign: 'center',
   },
   errorText: {
     color: '#FF3B30',
     fontSize: 12,
     fontWeight: '600',
     paddingVertical: 10,
+    textAlign: 'center',
   },
   splashScreen: {
     position: 'absolute',

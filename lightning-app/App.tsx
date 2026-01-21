@@ -1,7 +1,9 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { StyleSheet, View, Text, TouchableOpacity, ScrollView, Platform, StatusBar, Image, TextInput, Dimensions } from 'react-native';
+import { StyleSheet, View, Text, TouchableOpacity, Platform, StatusBar, TextInput, Dimensions } from 'react-native';
+import Slider from '@react-native-community/slider';
 import MapLibreGL from '@maplibre/maplibre-react-native';
 import * as SplashScreen from 'expo-splash-screen';
+import * as Location from 'expo-location';
 
 // Keep the splash screen visible while we fetch resources
 SplashScreen.preventAutoHideAsync();
@@ -18,16 +20,39 @@ const REGION = {
 };
 
 const BASE_BUCKET_URL = "https://storage.googleapis.com/inference_result/forecasts";
-// Android Emulator Localhost: 10.0.2.2
-// iOS Simulator Localhost: 127.0.0.1
-// Physical Device: Use your machine's LAN IP
-const SERVER_URL = Platform.OS === 'android' ? "http://10.0.2.2:3000" : "http://127.0.0.1:3000";
+// In development: use local server (Android Emulator: 10.0.2.2, iOS Simulator: 127.0.0.1)
+// In production: use Cloud Run endpoint
+const SERVER_URL = __DEV__
+  ? (Platform.OS === 'android' ? "http://10.0.2.2:3000" : "http://127.0.0.1:3000")
+  : "https://lightning-server-935480850831.europe-west1.run.app";
 
 const CHANNELS = [
   { id: 'lightning', label: 'Lightning' },
   { id: 'sat_ch0', label: 'VIS (Ch0)' },
   { id: 'sat_ch1', label: 'IR (Ch1)' },
 ];
+
+// OpenStreetMap style for MapLibre (same as web app)
+const OSM_STYLE = JSON.stringify({
+  version: 8,
+  sources: {
+    osm: {
+      type: 'raster',
+      tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+      tileSize: 256,
+      attribution: '© OpenStreetMap contributors'
+    }
+  },
+  layers: [
+    {
+      id: 'osm',
+      type: 'raster',
+      source: 'osm',
+      minzoom: 0,
+      maxzoom: 19
+    }
+  ]
+});
 
 interface Timestep {
   dateFolder: string;
@@ -103,6 +128,42 @@ export default function App() {
   const [activeLayerIndex, setActiveLayerIndex] = useState(0);
 
   const cameraRef = useRef<any>(null);
+  const [userLocation, setUserLocation] = useState<[number, number] | null>(null);
+
+  // Get user location on mount
+  useEffect(() => {
+    const getUserLocation = async () => {
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status !== 'granted') {
+          console.log('Location permission denied');
+          return;
+        }
+
+        const location = await Location.getCurrentPositionAsync({});
+        const { longitude, latitude } = location.coords;
+
+        // Check if user is within Europe bounds
+        if (longitude >= REGION.west && longitude <= REGION.east &&
+            latitude >= REGION.south && latitude <= REGION.north) {
+          setUserLocation([longitude, latitude]);
+
+          // Center map on user location
+          if (cameraRef.current) {
+            cameraRef.current.setCamera({
+              centerCoordinate: [longitude, latitude],
+              zoomLevel: 6,
+              animationDuration: 1000,
+            });
+          }
+        }
+      } catch (error) {
+        console.error('Error getting location:', error);
+      }
+    };
+
+    getUserLocation();
+  }, []);
 
   // Initialize Data
   useEffect(() => {
@@ -241,16 +302,6 @@ export default function App() {
   return (
     <View style={styles.page}>
       <StatusBar barStyle="light-content" />
-      
-      {/* Navbar */}
-      <View style={styles.navbar}>
-        <Image 
-            source={require('./public/logo_small.png')} 
-            style={styles.logo} 
-            resizeMode="contain" 
-        />
-        <Text style={styles.title}>FlashNet</Text>
-      </View>
 
       {/* Search Bar */}
       <View style={styles.searchContainer}>
@@ -282,8 +333,7 @@ export default function App() {
       {/* Map */}
       <MapLibreGL.MapView
         style={styles.map}
-        // @ts-ignore
-        styleURL="https://demotiles.maplibre.org/style.json"
+        styleJSON={OSM_STYLE}
         logoEnabled={false}
         attributionEnabled={false}
       >
@@ -291,7 +341,11 @@ export default function App() {
           ref={cameraRef}
           defaultSettings={{
             centerCoordinate: [(REGION.west + REGION.east) / 2, (REGION.north + REGION.south) / 2],
-            zoomLevel: 2
+            zoomLevel: 3
+          }}
+          maxBounds={{
+            ne: [REGION.east, REGION.north],
+            sw: [REGION.west, REGION.south]
           }}
         />
 
@@ -358,30 +412,33 @@ export default function App() {
             </View>
         </View>
         
-        <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            style={styles.timeScroll}
-            contentContainerStyle={styles.scrollContent}
-        >
-            {isScanning ? (
-                <Text style={styles.scanningText}>Scanning...</Text>
-            ) : timesteps.length === 0 ? (
-                <Text style={styles.errorText}>No timesteps</Text>
-            ) : (
-                timesteps.map((step) => (
-                <TouchableOpacity
-                    key={step.filenameTime}
-                    onPress={() => setSelectedStep(step)}
-                    style={[styles.timeBtn, selectedStep?.filenameTime === step.filenameTime && styles.selectedBtn]}
-                >
-                    <Text style={[styles.btnText, selectedStep?.filenameTime === step.filenameTime && styles.selectedBtnText]}>
-                    {step.label}
-                    </Text>
-                </TouchableOpacity>
-                ))
-            )}
-        </ScrollView>
+        {/* Timeline Slider */}
+        <View style={styles.timelineContainer}>
+          {isScanning ? (
+            <Text style={styles.scanningText}>Scanning...</Text>
+          ) : timesteps.length === 0 ? (
+            <Text style={styles.errorText}>No timesteps</Text>
+          ) : (
+            <>
+              <View style={styles.timeLabels}>
+                <Text style={styles.timeLabel}>{timesteps[0]?.label}</Text>
+                <Text style={styles.currentTimeLabel}>{selectedStep?.label}</Text>
+                <Text style={styles.timeLabel}>{timesteps[timesteps.length - 1]?.label}</Text>
+              </View>
+              <Slider
+                style={styles.slider}
+                minimumValue={0}
+                maximumValue={timesteps.length - 1}
+                step={1}
+                value={timesteps.findIndex(s => s.filenameTime === selectedStep?.filenameTime)}
+                onValueChange={(value) => setSelectedStep(timesteps[Math.round(value)])}
+                minimumTrackTintColor="#007AFF"
+                maximumTrackTintColor="rgba(255,255,255,0.3)"
+                thumbTintColor="#007AFF"
+              />
+            </>
+          )}
+        </View>
       </View>
     </View>
   );
@@ -392,34 +449,12 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#000',
   },
-  navbar: {
-    height: 60,
-    backgroundColor: '#000',
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 15,
-    borderBottomWidth: 1,
-    borderBottomColor: '#00FFFF',
-    zIndex: 10,
-    marginTop: Platform.OS === 'android' ? 25 : 0
-  },
-  logo: {
-    width: 30,
-    height: 30,
-    marginRight: 10,
-  },
-  title: {
-    color: '#00FFFF',
-    fontSize: 20,
-    fontWeight: 'bold',
-    letterSpacing: 1,
-  },
   map: {
     flex: 1,
   },
   searchContainer: {
     position: 'absolute',
-    top: Platform.OS === 'android' ? 95 : 70, // Adjust for status bar/navbar
+    top: Platform.OS === 'android' ? 40 : 50,
     left: 0,
     right: 0,
     alignItems: 'center',
@@ -522,20 +557,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     borderRadius: 18,
   },
-  timeScroll: {
-    maxHeight: 40,
-    width: '100%',
-  },
-  scrollContent: {
-    alignItems: 'center',
-  },
-  timeBtn: {
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 15,
-    marginRight: 5,
-    backgroundColor: 'rgba(255,255,255,0.1)',
-  },
   selectedBtn: {
     backgroundColor: '#007AFF',
   },
@@ -547,12 +568,42 @@ const styles = StyleSheet.create({
     color: 'white',
     fontWeight: 'bold',
   },
+  timelineContainer: {
+    width: '100%',
+    backgroundColor: 'rgba(0,0,0,0.8)',
+    borderRadius: 15,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: '#333',
+  },
+  timeLabels: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 5,
+    marginBottom: 5,
+  },
+  timeLabel: {
+    color: '#888',
+    fontSize: 11,
+  },
+  currentTimeLabel: {
+    color: '#00FFFF',
+    fontSize: 14,
+    fontWeight: 'bold',
+  },
+  slider: {
+    width: '100%',
+    height: 40,
+  },
   scanningText: {
     color: '#00FFFF',
     padding: 10,
+    textAlign: 'center',
   },
   errorText: {
     color: '#FF3B30',
     padding: 10,
+    textAlign: 'center',
   }
 });
