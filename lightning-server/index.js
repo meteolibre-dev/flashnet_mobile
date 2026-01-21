@@ -67,6 +67,9 @@ const RANGES = {
     'sat_ch1': { min: -3, max: 120 },
 };
 
+// Gamma correction for increased contrast (values < 1 increase contrast)
+const GAMMA = 0.5;
+
 // Plasma colormap (256 entries) - from matplotlib
 const PLASMA_COLORMAP = [
     [13, 8, 135], [16, 7, 138], [19, 7, 141], [22, 7, 144], [25, 6, 147], [27, 6, 150], [30, 5, 153], [33, 5, 156],
@@ -104,7 +107,7 @@ const PLASMA_COLORMAP = [
 ];
 
 function getPlasmaColor(normalized) {
-    const idx = Math.min(255, Math.max(0, Math.floor(normalized * 255)));
+    const idx = Math.min(223, Math.max(0, Math.floor(normalized * 255)));
     return PLASMA_COLORMAP[idx];
 }
 
@@ -120,6 +123,11 @@ function getColor(val, channelId) {
     if (c > max) c = max;
     let range = max - min;
     let normalized = range === 0 ? 0 : (c - min) / range;
+
+    // Apply gamma correction for increased contrast
+    normalized = Math.pow(normalized, GAMMA);
+    // Clamp to valid range after gamma correction
+    normalized = Math.min(1, Math.max(0, normalized));
 
     if (channelId === 'lightning') {
         let pixelVal = Math.floor(normalized * 255);
@@ -419,6 +427,83 @@ app.get('/tiles/:z/:x/:y.png', async (req, res) => {
     }
 });
 
-app.listen(PORT, '0.0.0.0', () => {
+const BUCKET_BASE_URL = "https://storage.googleapis.com/inference_result/forecasts";
+
+// Pre-cache the last 18 timesteps for all channels at startup
+async function preCacheLatestTimesteps() {
+    console.log('Pre-caching latest timesteps...');
+    const now = new Date();
+    const datesToCheck = [];
+    for (let i = 0; i < 3; i++) {
+        const d = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
+        datesToCheck.push(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`);
+    }
+
+    const availableTimesteps = [];
+
+    // Scan for available timesteps
+    for (const dateFolder of datesToCheck) {
+        const listUrl = `https://storage.googleapis.com/storage/v1/b/inference_result/o?prefix=forecasts/${dateFolder}/`;
+        try {
+            const response = await fetch(listUrl);
+            if (response.ok) {
+                const data = await response.json();
+                if (data.items) {
+                    for (const item of data.items) {
+                        const match = item.name.match(/forecast_(\d{12})_lightning\.tiff$/);
+                        if (match) {
+                            const filenameTime = match[1];
+                            if (!availableTimesteps.find(s => s.filenameTime === filenameTime)) {
+                                availableTimesteps.push({ dateFolder, filenameTime });
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (error) {
+            console.error(`Error scanning ${dateFolder}:`, error.message);
+        }
+    }
+
+    // Sort by time and take the last 18
+    availableTimesteps.sort((a, b) => a.filenameTime.localeCompare(b.filenameTime));
+    const latestTimesteps = availableTimesteps.slice(-18);
+
+    console.log(`Found ${latestTimesteps.length} latest timesteps. Downloading...`);
+
+    // Download all channels for each timestep
+    const channels = ['lightning', 'sat_ch0', 'sat_ch1'];
+    let downloaded = 0;
+
+    for (const ts of latestTimesteps) {
+        for (const channel of channels) {
+            const filename = `forecast_${ts.filenameTime}_${channel}.tiff`;
+            const localPath = path.join(CACHE_DIR, filename);
+            const url = `${BUCKET_BASE_URL}/${ts.dateFolder}/${filename}`;
+
+            if (!fs.existsSync(localPath)) {
+                try {
+                    console.log(`  Downloading ${filename}...`);
+                    const response = await fetch(url);
+                    if (response.ok) {
+                        const buffer = await response.buffer();
+                        fs.writeFileSync(localPath, buffer);
+                        downloaded++;
+                    }
+                } catch (error) {
+                    console.error(`  Failed to download ${filename}:`, error.message);
+                }
+            } else {
+                console.log(`  ${filename} already cached`);
+            }
+        }
+    }
+
+    console.log(`Pre-caching complete. Downloaded ${downloaded} new files.`);
+}
+
+// Start server
+app.listen(PORT, '0.0.0.0', async () => {
     console.log(`Tile Server running on port ${PORT}`);
+    await preCacheLatestTimesteps();
 });
