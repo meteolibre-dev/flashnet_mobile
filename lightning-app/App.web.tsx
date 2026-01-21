@@ -205,7 +205,7 @@ export default function App() {
         const available = await scanAvailableTimesteps(18);
         setTimesteps(available);
         if (available.length > 0) {
-          setSelectedStep(available[available.length - 1]);
+          setSelectedStep(available[0]);
         }
       } catch (error) {
         console.error('Error scanning timesteps:', error);
