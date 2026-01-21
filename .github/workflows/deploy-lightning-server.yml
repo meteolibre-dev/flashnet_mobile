@@ -47,6 +47,7 @@ jobs:
       - name: 'Build and Push Container Image'
         run: |
           docker build \
+            -f ${{ env.CONTEXT_DIR }}/Dockerfile \
             --tag ${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:${{ steps.git-sha.outputs.SHORT_SHA }} \
             --tag ${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:latest \
             ${{ env.CONTEXT_DIR }}
