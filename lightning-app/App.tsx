@@ -19,26 +19,26 @@ const REGION = {
   south: 33.0,
 };
 
-const BASE_BUCKET_URL = "https://storage.googleapis.com/inference_result/forecasts";
-// In development: use local server (Android Emulator: 10.0.2.2, iOS Simulator: 127.0.0.1)
-// In production: use Cloud Run endpoint
-const SERVER_URL = __DEV__
-  ? (Platform.OS === 'android' ? "http://10.0.2.2:3000" : "http://127.0.0.1:3000")
-  : "https://lightning-server-935480850831.europe-west1.run.app";
+// Free OSM vector style from MapTiler (get free key at https://cloud.maptiler.com/)
+const MAPTILER_API_KEY = 'Jn3KRzqaoa55axAJ3gnp';
 
-const CHANNELS = [
-  { id: 'lightning', label: 'Lightning' },
-  { id: 'sat_ch0', label: 'VIS (Ch0)' },
-  { id: 'sat_ch1', label: 'IR (Ch1)' },
-];
+// MapTiler Basic style - detailed OSM vector rendering
+const OSM_VECTOR_STYLE = `https://api.maptiler.com/maps/basic-v2/style.json?key=${MAPTILER_API_KEY}`;
 
-// OpenStreetMap style for MapLibre (same as web app)
-const OSM_STYLE = JSON.stringify({
+// CartoCDN Light - free, simple map perfect for weather overlays
+const CARTOLIGHT_STYLE = 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json';
+
+// Fallback: Detailed OSM raster tiles (works without API key)
+const OSM_RASTER_STYLE = JSON.stringify({
   version: 8,
   sources: {
     osm: {
       type: 'raster',
-      tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+      tiles: [
+        'https://a.tile.openstreetmap.org/{z}/{x}/{y}.png',
+        'https://b.tile.openstreetmap.org/{z}/{x}/{y}.png',
+        'https://c.tile.openstreetmap.org/{z}/{x}/{y}.png'
+      ],
       tileSize: 256,
       attribution: '© OpenStreetMap contributors'
     }
@@ -53,6 +53,17 @@ const OSM_STYLE = JSON.stringify({
     }
   ]
 });
+
+const BASE_BUCKET_URL = "https://storage.googleapis.com/inference_result/forecasts";
+
+// Production Cloud Run endpoint
+const SERVER_URL = "https://lightning-server-935480850831.europe-west1.run.app";
+
+const CHANNELS = [
+  { id: 'lightning', label: 'Lightning' },
+  { id: 'sat_ch0', label: 'VIS (Ch0)' },
+  { id: 'sat_ch1', label: 'IR (Ch1)' },
+];
 
 interface Timestep {
   dateFolder: string;
@@ -94,7 +105,7 @@ const scanAvailableTimesteps = async (maxTimesteps: number = 18): Promise<Timest
                 availableTimesteps.push({
                   dateFolder,
                   filenameTime,
-                  label: `${hour}:${minute}`,
+                  label: `${hour}h${minute}`,
                   fullDate
                 });
               }
@@ -120,12 +131,21 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [showSearchResults, setShowSearchResults] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
+  const [isLoading, setIsLoading] = useState(false); // internal, not shown in UI
+
+  // Layer 0 State
   const [layerUrl, setLayerUrl] = useState<string | null>(null);
   const [layerCoordinates, setLayerCoordinates] = useState<any>(null);
+  const [layerId, setLayerId] = useState<string>("src-0");
+
+  // Layer 1 State
   const [nextLayerUrl, setNextLayerUrl] = useState<string | null>(null);
   const [nextLayerCoordinates, setNextLayerCoordinates] = useState<any>(null);
+  const [nextLayerId, setNextLayerId] = useState<string>("src-1");
+
   const [activeLayerIndex, setActiveLayerIndex] = useState(0);
+  const [prevActiveLayerIndex, setPrevActiveLayerIndex] = useState<0 | 1 | null>(null);
+  const isUpdatingLayer = useRef(false);
 
   const cameraRef = useRef<any>(null);
   const [userLocation, setUserLocation] = useState<[number, number] | null>(null);
@@ -179,6 +199,8 @@ export default function App() {
         console.error('Error scanning timesteps:', error);
       } finally {
         setIsScanning(false);
+        // Additional delay to let splash screen show longer
+        await new Promise(resolve => setTimeout(resolve, 1000));
         await SplashScreen.hideAsync();
       }
     };
@@ -195,14 +217,48 @@ export default function App() {
           const nextIndex = (currentIndex + 1) % timesteps.length;
           return timesteps[nextIndex];
         });
-      }, 1000);
+      }, 3000); // 3 seconds to allow satellite images to load
     } else {
       if (playInterval.current) clearInterval(playInterval.current);
     }
     return () => {
       if (playInterval.current) clearInterval(playInterval.current);
     };
-  }, [isPlaying, timesteps]);
+  }, [isPlaying, timesteps, isLoading]);
+
+  // Clear hidden layer when it changes (frees MapLibre native memory)
+  useEffect(() => {
+    if (prevActiveLayerIndex !== null) {
+      // Delay cleaning the old layer to prevent blinking/empty frames while the new one loads
+      // Android native image loading is async and takes time
+      const timeout = setTimeout(() => {
+        if (prevActiveLayerIndex === 0) {
+          setLayerUrl(null);
+          setLayerCoordinates(null);
+        } else {
+          setNextLayerUrl(null);
+          setNextLayerCoordinates(null);
+        }
+        setPrevActiveLayerIndex(null);
+      }, 4000); // Wait 4s before clearing old layer (longer than interval to prevent blanks)
+
+      return () => clearTimeout(timeout);
+    }
+  }, [prevActiveLayerIndex]);
+
+  // Clear buffer layers when playback stops to free memory
+  useEffect(() => {
+    if (!isPlaying) {
+      // Keep only the current active layer, clear the buffer
+      if (activeLayerIndex === 1) {
+        setLayerUrl(null);
+        setLayerCoordinates(null);
+      } else {
+        setNextLayerUrl(null);
+        setNextLayerCoordinates(null);
+      }
+    }
+  }, [isPlaying, activeLayerIndex]);
 
   // Search Logic
   const searchLocation = async (query: string) => {
@@ -218,8 +274,15 @@ export default function App() {
         { headers: { 'User-Agent': 'FlashNetMobile/1.0' } }
       );
       const data = await response.json();
-      setSearchResults(data);
-      setShowSearchResults(true);
+
+      // Only update results if query hasn't changed (ignore stale results)
+      setSearchQuery(currentQuery => {
+        if (currentQuery === query) {
+          setSearchResults(data);
+          setShowSearchResults(true);
+        }
+        return currentQuery;
+      });
     } catch (error) {
       console.error('Search error:', error);
     }
@@ -228,7 +291,7 @@ export default function App() {
   const handleSearchChange = (text: string) => {
     setSearchQuery(text);
     if (text.length >= 2) {
-      const debounce = setTimeout(() => searchLocation(text), 300);
+      const debounce = setTimeout(() => searchLocation(text), 700);
       return () => clearTimeout(debounce);
     } else {
       setSearchResults([]);
@@ -254,38 +317,50 @@ export default function App() {
 
   // Update Layer Logic
   useEffect(() => {
+    const controller = new AbortController();
+
     const updateLayer = async () => {
         if (!selectedStep) return;
-        
+
+        // Skip if already updating to prevent overlapping requests
+        if (isUpdatingLayer.current) return;
+        isUpdatingLayer.current = true;
+
         setIsLoading(true);
         try {
           const tiffUrl = `${BASE_BUCKET_URL}/${selectedStep.dateFolder}/forecast_${selectedStep.filenameTime}_${selectedChannel.id}.tiff`;
-          
+
           // 1. Get Metadata (Coordinates)
           const metaUrl = `${SERVER_URL}/metadata?url=${encodeURIComponent(tiffUrl)}`;
-          const metaRes = await fetch(metaUrl);
+          const metaRes = await fetch(metaUrl, { signal: controller.signal });
           if (!metaRes.ok) throw new Error('Failed to fetch metadata');
           const metaData = await metaRes.json();
           
           // 2. Set Image URL
           const imageUrl = `${SERVER_URL}/image?url=${encodeURIComponent(tiffUrl)}&channel=${selectedChannel.id}`;
           
-          // Double Buffering Logic
-          // We load the new image into the "next" layer slot
-          // In React Native MapLibre, we can't easily detect "onLoad".
-          // However, since we are using a local server that caches the PNG, the load should be fast.
-          // We will update the "active" layer pointer immediately, but we keep rendering BOTH layers.
-          // The "new" layer will render on top of the "old" layer.
-          
+          // Double Buffering Logic with Memory Management
+          // We load the new image into the "next" layer slot, then swap.
+          // After swapping, we clear the hidden layer to free memory.
+
+          // Generate unique ID to ensure fresh native source allocation
+          const uniqueId = `src-${Date.now()}`;
+
           if (activeLayerIndex === 0) {
+             // Set the new layer
+             setNextLayerId(uniqueId);
              setNextLayerUrl(imageUrl);
              setNextLayerCoordinates(metaData.coordinates);
+             // Track previous and swap
+             setPrevActiveLayerIndex(0);
              setActiveLayerIndex(1);
-             // After a delay, clear the old layer to save memory? 
-             // Or just keep it. It's hidden by the new one.
           } else {
+             // Set the new layer
+             setLayerId(uniqueId);
              setLayerUrl(imageUrl);
              setLayerCoordinates(metaData.coordinates);
+             // Track previous and swap
+             setPrevActiveLayerIndex(1);
              setActiveLayerIndex(0);
           }
 
@@ -293,10 +368,13 @@ export default function App() {
             console.error('Error updating layer:', error);
         } finally {
             setIsLoading(false);
+            isUpdatingLayer.current = false;
         }
     };
 
     updateLayer();
+
+    return () => controller.abort();
   }, [selectedStep, selectedChannel]);
 
   return (
@@ -333,9 +411,9 @@ export default function App() {
       {/* Map */}
       <MapLibreGL.MapView
         style={styles.map}
-        styleJSON={OSM_STYLE}
+        mapStyle={CARTOLIGHT_STYLE}
         logoEnabled={false}
-        attributionEnabled={false}
+        attributionEnabled={true}
       >
         <MapLibreGL.Camera
           ref={cameraRef}
@@ -354,13 +432,13 @@ export default function App() {
           <>
              {/* Render 0 (Bottom) then 1 (Top) */}
              {layerUrl && layerCoordinates && (
-               <MapLibreGL.ImageSource id="src-0" coordinates={layerCoordinates} url={layerUrl}>
-                 <MapLibreGL.RasterLayer id="layer-0" style={{ rasterOpacity: 0.8, rasterFadeDuration: 0 }} />
+               <MapLibreGL.ImageSource id={layerId} coordinates={layerCoordinates} url={layerUrl}>
+                 <MapLibreGL.RasterLayer id={`layer-${layerId}`} style={{ rasterOpacity: 0.8, rasterFadeDuration: 0 }} />
                </MapLibreGL.ImageSource>
              )}
              {nextLayerUrl && nextLayerCoordinates && (
-               <MapLibreGL.ImageSource id="src-1" coordinates={nextLayerCoordinates} url={nextLayerUrl}>
-                 <MapLibreGL.RasterLayer id="layer-1" style={{ rasterOpacity: 0.8, rasterFadeDuration: 0 }} />
+               <MapLibreGL.ImageSource id={nextLayerId} coordinates={nextLayerCoordinates} url={nextLayerUrl}>
+                 <MapLibreGL.RasterLayer id={`layer-${nextLayerId}`} style={{ rasterOpacity: 0.8, rasterFadeDuration: 0 }} />
                </MapLibreGL.ImageSource>
              )}
           </>
@@ -368,24 +446,20 @@ export default function App() {
           <>
              {/* Render 1 (Bottom) then 0 (Top) */}
              {nextLayerUrl && nextLayerCoordinates && (
-               <MapLibreGL.ImageSource id="src-1" coordinates={nextLayerCoordinates} url={nextLayerUrl}>
-                 <MapLibreGL.RasterLayer id="layer-1" style={{ rasterOpacity: 0.8, rasterFadeDuration: 0 }} />
+               <MapLibreGL.ImageSource id={nextLayerId} coordinates={nextLayerCoordinates} url={nextLayerUrl}>
+                 <MapLibreGL.RasterLayer id={`layer-${nextLayerId}`} style={{ rasterOpacity: 0.8, rasterFadeDuration: 0 }} />
                </MapLibreGL.ImageSource>
              )}
              {layerUrl && layerCoordinates && (
-               <MapLibreGL.ImageSource id="src-0" coordinates={layerCoordinates} url={layerUrl}>
-                 <MapLibreGL.RasterLayer id="layer-0" style={{ rasterOpacity: 0.8, rasterFadeDuration: 0 }} />
+               <MapLibreGL.ImageSource id={layerId} coordinates={layerCoordinates} url={layerUrl}>
+                 <MapLibreGL.RasterLayer id={`layer-${layerId}`} style={{ rasterOpacity: 0.8, rasterFadeDuration: 0 }} />
                </MapLibreGL.ImageSource>
              )}
           </>
         )}
       </MapLibreGL.MapView>
       
-      {isLoading && (
-        <View style={styles.loader}>
-          <Text style={styles.loaderText}>Loading...</Text>
-        </View>
-      )}
+      {/* Remove loading overlay during playback - double buffering prevents blanks */}
 
       {/* Controls */}
       <View style={styles.controlsContainer}>
@@ -497,20 +571,6 @@ const styles = StyleSheet.create({
     color: '#333',
     fontSize: 14,
   },
-  loader: {
-    position: 'absolute',
-    top: '50%',
-    left: '50%',
-    transform: [{ translateX: -50 }, { translateY: -50 }],
-    backgroundColor: 'rgba(0,0,0,0.7)',
-    padding: 15,
-    borderRadius: 10,
-    zIndex: 2000,
-  },
-  loaderText: {
-    color: 'white',
-    fontWeight: 'bold',
-  },
   controlsContainer: {
     position: 'absolute',
     bottom: 30,
@@ -586,18 +646,22 @@ const styles = StyleSheet.create({
   timeLabel: {
     color: '#888',
     fontSize: 11,
+    minWidth: 40,
+    textAlign: 'center',
   },
   currentTimeLabel: {
-    color: '#00FFFF',
+    color: '#007AFF',
     fontSize: 14,
     fontWeight: 'bold',
+    minWidth: 50,
+    textAlign: 'center',
   },
   slider: {
     width: '100%',
     height: 40,
   },
   scanningText: {
-    color: '#00FFFF',
+    color: '#007AFF',
     padding: 10,
     textAlign: 'center',
   },

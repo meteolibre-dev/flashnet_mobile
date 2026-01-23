@@ -16,6 +16,9 @@ const SERVER_URL = __DEV__
   ? "http://localhost:3000"
   : "https://lightning-server-935480850831.europe-west1.run.app";
 
+// CartoCDN Light - free, simple map perfect for weather overlays
+const CARTOLIGHT_STYLE = 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json';
+
 const CHANNELS = [
   { id: 'lightning', label: 'Lightning' },
   { id: 'sat_ch0', label: 'VIS (Ch0)' },
@@ -117,7 +120,7 @@ export default function App() {
       }).start(() => {
         setIsSplashVisible(false);
       });
-    }, 2000);
+    }, 3000);
     return () => clearTimeout(timer);
   }, []);
 
@@ -127,26 +130,7 @@ export default function App() {
       import('maplibre-gl').then(({ Map, NavigationControl }) => {
         const map = new Map({
           container: mapRef.current,
-          style: {
-            version: 8,
-            sources: {
-              'osm': {
-                type: 'raster',
-                tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
-                tileSize: 256,
-                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-              }
-            },
-            layers: [
-              {
-                id: 'osm',
-                type: 'raster',
-                source: 'osm',
-                minzoom: 0,
-                maxzoom: 19
-              }
-            ]
-          },
+          style: CARTOLIGHT_STYLE,
           center: [(REGION.west + REGION.east) / 2, (REGION.north + REGION.south) / 2],
           zoom: 3,
           maxBounds: [[REGION.west, REGION.south], [REGION.east, REGION.north]]
@@ -247,8 +231,15 @@ export default function App() {
         `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=5`
       );
       const data = await response.json();
-      setSearchResults(data);
-      setShowSearchResults(true);
+
+      // Only update results if query hasn't changed (ignore stale results)
+      setSearchQuery(currentQuery => {
+        if (currentQuery === query) {
+          setSearchResults(data);
+          setShowSearchResults(true);
+        }
+        return currentQuery;
+      });
     } catch (error) {
       console.error('Search error:', error);
     }
@@ -257,7 +248,7 @@ export default function App() {
   const handleSearchChange = (text: string) => {
     setSearchQuery(text);
     if (text.length >= 2) {
-      const debounce = setTimeout(() => searchLocation(text), 300);
+      const debounce = setTimeout(() => searchLocation(text), 700);
       return () => clearTimeout(debounce);
     } else {
       setSearchResults([]);
@@ -367,11 +358,7 @@ export default function App() {
         </View>
       )}
       
-      {isLoading && (
-        <View style={styles.loader}>
-          <Text style={styles.loaderText}>Loading...</Text>
-        </View>
-      )}
+      {/* Loading overlay removed - smooth playback with existing layer */}
 
       <View style={styles.controlsContainer}>
         {/* Channel Selector */}
@@ -468,20 +455,6 @@ const styles = StyleSheet.create({
     flex: 1,
     width: '100%',
     // Removed minHeight to allow flex layout with navbar
-  },
-  loader: {
-    position: 'absolute',
-    top: 80, // Moved down below navbar
-    left: '50%',
-    transform: [{ translateX: '-50%' }],
-    backgroundColor: 'rgba(0,0,0,0.7)',
-    padding: 10,
-    borderRadius: 8,
-    zIndex: 2000,
-  },
-  loaderText: {
-    color: 'white',
-    fontWeight: 'bold',
   },
   searchContainer: {
     position: 'absolute',
