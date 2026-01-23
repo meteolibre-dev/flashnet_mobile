@@ -12,9 +12,7 @@ const REGION = {
 
 const BASE_BUCKET_URL = "https://storage.googleapis.com/inference_result/forecasts";
 // In development: use local server, in production: use Cloud Run endpoint
-const SERVER_URL = __DEV__
-  ? "http://localhost:3000"
-  : "https://lightning-server-935480850831.europe-west1.run.app";
+const SERVER_URL = "https://lightning-server-935480850831.europe-west1.run.app";
 
 // CartoCDN Light - free, simple map perfect for weather overlays
 const CARTOLIGHT_STYLE = 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json';
