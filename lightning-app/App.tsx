@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { StyleSheet, View, Text, TouchableOpacity, Platform, StatusBar, TextInput, Dimensions } from 'react-native';
+import { StyleSheet, View, Text, TouchableOpacity, Platform, StatusBar, TextInput, Dimensions, Image } from 'react-native';
 import Slider from '@react-native-community/slider';
 import MapLibreGL from '@maplibre/maplibre-react-native';
 import * as SplashScreen from 'expo-splash-screen';
@@ -132,6 +132,7 @@ export default function App() {
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [showSearchResults, setShowSearchResults] = useState(false);
   const [isLoading, setIsLoading] = useState(false); // internal, not shown in UI
+  const [isAppReady, setIsAppReady] = useState(false);
 
   // Layer 0 State
   const [layerUrl, setLayerUrl] = useState<string | null>(null);
@@ -202,6 +203,7 @@ export default function App() {
         // Additional delay to let splash screen show longer
         await new Promise(resolve => setTimeout(resolve, 1000));
         await SplashScreen.hideAsync();
+        setIsAppReady(true);
       }
     };
     initTimesteps();
@@ -379,6 +381,14 @@ export default function App() {
 
   return (
     <View style={styles.page}>
+      {/* Custom Splash Screen */}
+      {!isAppReady && (
+        <View style={styles.splashContainer}>
+          <Image source={require('./assets/icon.png')} style={styles.splashLogo} />
+          <Text style={styles.splashTitle}>by meteolibre</Text>
+        </View>
+      )}
+
       <StatusBar barStyle="light-content" />
 
       {/* Search Bar */}
@@ -669,5 +679,27 @@ const styles = StyleSheet.create({
     color: '#FF3B30',
     padding: 10,
     textAlign: 'center',
-  }
+  },
+  // Custom Splash Screen
+  splashContainer: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: '#000000',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 9999,
+  },
+  splashLogo: {
+    width: 150,
+    height: 150,
+    resizeMode: 'contain',
+  },
+  splashTitle: {
+    color: '#ffffff',
+    fontSize: 16,
+    marginTop: 20,
+  },
 });
