@@ -72,6 +72,11 @@ interface Timestep {
   fullDate: Date;
 }
 
+interface PrefetchedData {
+  url: string;
+  coordinates: any;
+}
+
 const scanAvailableTimesteps = async (maxTimesteps: number = 18): Promise<Timestep[]> => {
   const availableTimesteps: Timestep[] = [];
   const now = new Date();
@@ -147,6 +152,9 @@ export default function App() {
   const [activeLayerIndex, setActiveLayerIndex] = useState(0);
   const [prevActiveLayerIndex, setPrevActiveLayerIndex] = useState<0 | 1 | null>(null);
   const isUpdatingLayer = useRef(false);
+
+  // Pre-fetch cache
+  const [prefetchedData, setPrefetchedData] = useState<Record<string, PrefetchedData>>({});
 
   const cameraRef = useRef<any>(null);
   const [userLocation, setUserLocation] = useState<[number, number] | null>(null);
@@ -317,6 +325,58 @@ export default function App() {
     setShowSearchResults(false);
   };
 
+  // Pre-fetch next logic
+  useEffect(() => {
+    if (!selectedStep || timesteps.length === 0) return;
+
+    const currentIndex = timesteps.findIndex(s => s.filenameTime === selectedStep.filenameTime);
+    const nextSteps = [
+        timesteps[(currentIndex + 1) % timesteps.length],
+        timesteps[(currentIndex + 2) % timesteps.length],
+    ];
+
+    nextSteps.forEach(async (step) => {
+        const cacheKey = `${step.filenameTime}_${selectedChannel.id}`;
+        if (prefetchedData[cacheKey]) return;
+
+        try {
+            const tiffUrl = `${BASE_BUCKET_URL}/${step.dateFolder}/forecast_${step.filenameTime}_${selectedChannel.id}.tiff`;
+            const metaUrl = `${SERVER_URL}/metadata?url=${encodeURIComponent(tiffUrl)}`;
+
+            // Fetch metadata
+            const metaRes = await fetch(metaUrl);
+            if (!metaRes.ok) return;
+            const metaData = await metaRes.json();
+
+            const imageUrl = `${SERVER_URL}/image?url=${encodeURIComponent(tiffUrl)}&channel=${selectedChannel.id}`;
+
+            // "Warm" the image cache by doing a HEAD request or a silent fetch if needed
+            // But just setting the state facilitates immediate UI update later
+            setPrefetchedData(prev => ({
+                ...prev,
+                [cacheKey]: { url: imageUrl, coordinates: metaData.coordinates }
+            }));
+
+            // Trigger a silent background download to browser/app cache
+            fetch(imageUrl, { method: 'HEAD' }).catch(() => {});
+
+        } catch (e) {
+            console.warn('Pre-fetch failed', e);
+        }
+    });
+
+    // Cleanup old cache entries (keep last 10)
+    if (Object.keys(prefetchedData).length > 20) {
+        setPrefetchedData(prev => {
+            const keys = Object.keys(prev);
+            const newCache = { ...prev };
+            keys.slice(0, keys.length - 10).forEach(k => delete newCache[k]);
+            return newCache;
+        });
+    }
+
+  }, [selectedStep, selectedChannel, timesteps]);
+
   // Update Layer Logic
   useEffect(() => {
     const controller = new AbortController();
@@ -330,17 +390,28 @@ export default function App() {
 
         setIsLoading(true);
         try {
-          const tiffUrl = `${BASE_BUCKET_URL}/${selectedStep.dateFolder}/forecast_${selectedStep.filenameTime}_${selectedChannel.id}.tiff`;
+          const cacheKey = `${selectedStep.filenameTime}_${selectedChannel.id}`;
+          let metaData;
+          let imageUrl;
 
-          // 1. Get Metadata (Coordinates)
-          const metaUrl = `${SERVER_URL}/metadata?url=${encodeURIComponent(tiffUrl)}`;
-          const metaRes = await fetch(metaUrl, { signal: controller.signal });
-          if (!metaRes.ok) throw new Error('Failed to fetch metadata');
-          const metaData = await metaRes.json();
-          
-          // 2. Set Image URL
-          const imageUrl = `${SERVER_URL}/image?url=${encodeURIComponent(tiffUrl)}&channel=${selectedChannel.id}`;
-          
+          if (prefetchedData[cacheKey]) {
+            // Use cached data immediately
+            metaData = prefetchedData[cacheKey];
+            imageUrl = metaData.url;
+          } else {
+            const tiffUrl = `${BASE_BUCKET_URL}/${selectedStep.dateFolder}/forecast_${selectedStep.filenameTime}_${selectedChannel.id}.tiff`;
+
+            // 1. Get Metadata (Coordinates)
+            const metaUrl = `${SERVER_URL}/metadata?url=${encodeURIComponent(tiffUrl)}`;
+            const metaRes = await fetch(metaUrl, { signal: controller.signal });
+            if (!metaRes.ok) throw new Error('Failed to fetch metadata');
+            const data = await metaRes.json();
+            metaData = { coordinates: data.coordinates };
+
+            // 2. Set Image URL
+            imageUrl = `${SERVER_URL}/image?url=${encodeURIComponent(tiffUrl)}&channel=${selectedChannel.id}`;
+          }
+
           // Double Buffering Logic with Memory Management
           // We load the new image into the "next" layer slot, then swap.
           // After swapping, we clear the hidden layer to free memory.

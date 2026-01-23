@@ -32,6 +32,11 @@ interface Timestep {
   fullDate: Date;
 }
 
+interface PrefetchedData {
+  url: string;
+  coordinates: any;
+}
+
 const scanAvailableTimesteps = async (maxTimesteps: number = 18): Promise<Timestep[]> => {
   const availableTimesteps: Timestep[] = [];
   const now = new Date();
@@ -95,6 +100,9 @@ export default function App() {
   const mapInstance = useRef<any>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isScanning, setIsScanning] = useState(true);
+
+  // Pre-fetch cache
+  const [prefetchedData, setPrefetchedData] = useState<Record<string, PrefetchedData>>({});
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [showSearchResults, setShowSearchResults] = useState(false);
@@ -266,6 +274,58 @@ export default function App() {
     setShowSearchResults(false);
   };
 
+  // Pre-fetch next logic
+  useEffect(() => {
+    if (!selectedStep || timesteps.length === 0) return;
+
+    const currentIndex = timesteps.findIndex(s => s.filenameTime === selectedStep.filenameTime);
+    const nextSteps = [
+        timesteps[(currentIndex + 1) % timesteps.length],
+        timesteps[(currentIndex + 2) % timesteps.length],
+    ];
+
+    nextSteps.forEach(async (step) => {
+        const cacheKey = `${step.filenameTime}_${selectedChannel.id}`;
+        if (prefetchedData[cacheKey]) return;
+
+        try {
+            const tiffUrl = `${BASE_BUCKET_URL}/${step.dateFolder}/forecast_${step.filenameTime}_${selectedChannel.id}.tiff`;
+            const metaUrl = `${SERVER_URL}/metadata?url=${encodeURIComponent(tiffUrl)}`;
+
+            // Fetch metadata
+            const metaRes = await fetch(metaUrl);
+            if (!metaRes.ok) return;
+            const metaData = await metaRes.json();
+
+            const imageUrl = `${SERVER_URL}/image?url=${encodeURIComponent(tiffUrl)}&channel=${selectedChannel.id}`;
+
+            // Store in prefetch cache
+            setPrefetchedData(prev => ({
+                ...prev,
+                [cacheKey]: { url: imageUrl, coordinates: metaData.coordinates }
+            }));
+
+            // Pre-load image into browser cache
+            const img = new (window as any).Image();
+            img.src = imageUrl;
+
+        } catch (e) {
+            console.warn('Pre-fetch failed', e);
+        }
+    });
+
+    // Cleanup old cache entries (keep last 20)
+    if (Object.keys(prefetchedData).length > 30) {
+        setPrefetchedData(prev => {
+            const keys = Object.keys(prev);
+            const newCache = { ...prev };
+            keys.slice(0, keys.length - 10).forEach(k => delete newCache[k]);
+            return newCache;
+        });
+    }
+
+  }, [selectedStep, selectedChannel, timesteps]);
+
   // Update layer when selection changes
   useEffect(() => {
     if (mapInstance.current && mapInstance.current.isStyleLoaded() && selectedStep) {
@@ -283,18 +343,28 @@ export default function App() {
 
     setIsLoading(true);
     try {
-      const tiffUrl = `${BASE_BUCKET_URL}/${selectedStep.dateFolder}/forecast_${selectedStep.filenameTime}_${selectedChannel.id}.tiff`;
-      
-      // 1. Get Metadata (Coordinates)
-      const metaUrl = `${SERVER_URL}/metadata?url=${encodeURIComponent(tiffUrl)}`;
-      const metaRes = await fetch(metaUrl);
-      if (!metaRes.ok) throw new Error('Failed to fetch metadata');
-      const metaData = await metaRes.json();
-      
-      // 2. Set Image URL (Full Image)
-      const imageUrl = `${SERVER_URL}/image?url=${encodeURIComponent(tiffUrl)}&channel=${selectedChannel.id}`;
-      
-      console.log('Using Full Image URL:', imageUrl);
+      const cacheKey = `${selectedStep.filenameTime}_${selectedChannel.id}`;
+      let metaData;
+      let imageUrl;
+
+      if (prefetchedData[cacheKey]) {
+        metaData = prefetchedData[cacheKey];
+        imageUrl = metaData.url;
+      } else {
+        const tiffUrl = `${BASE_BUCKET_URL}/${selectedStep.dateFolder}/forecast_${selectedStep.filenameTime}_${selectedChannel.id}.tiff`;
+
+        // 1. Get Metadata (Coordinates)
+        const metaUrl = `${SERVER_URL}/metadata?url=${encodeURIComponent(tiffUrl)}`;
+        const metaRes = await fetch(metaUrl);
+        if (!metaRes.ok) throw new Error('Failed to fetch metadata');
+        const data = await metaRes.json();
+        metaData = { coordinates: data.coordinates };
+
+        // 2. Set Image URL (Full Image)
+        imageUrl = `${SERVER_URL}/image?url=${encodeURIComponent(tiffUrl)}&channel=${selectedChannel.id}`;
+      }
+
+      console.log('Using Image URL:', imageUrl);
       console.log('Coordinates:', metaData.coordinates);
 
       map.addSource('forecast-source', {
