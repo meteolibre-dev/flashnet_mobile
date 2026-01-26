@@ -65,4 +65,5 @@ jobs:
             --allow-unauthenticated \
             --memory 4Gi \
             --cpu 2 \
+            --min-instances 1 \
             --set-env-vars NODE_ENV=production
