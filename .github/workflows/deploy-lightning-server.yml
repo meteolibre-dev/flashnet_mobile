@@ -11,7 +11,7 @@ on:
 
 env:
   PROJECT_ID: meteoforecast
-  GAR_LOCATION: europe-west1
+  GAR_LOCATION: europe-west3
   SERVICE: lightning-server
   REPOSITORY: flashnet-repo
   IMAGE_NAME: lightning-server
