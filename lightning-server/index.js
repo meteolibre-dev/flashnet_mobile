@@ -143,8 +143,8 @@ function getColor(val, channelId) {
             return [0, 0, 0, 0];
         }
     } else {
-        // Plasma colormap for satellite channels
-        const [r, g, b] = getPlasmaColor(normalized);
+        // Plasma colormap for satellite channels (inverted)
+        const [r, g, b] = getPlasmaColor(1 - normalized);
         return [r, g, b, 204]; // 204 is approx 0.8 * 255
     }
 }
