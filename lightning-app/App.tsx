@@ -57,7 +57,7 @@ const OSM_RASTER_STYLE = JSON.stringify({
 const BASE_BUCKET_URL = "https://storage.googleapis.com/inference_result/forecasts";
 
 // Production Cloud Run endpoint
-const SERVER_URL = "https://lightning-server-935480850831.europe-west1.run.app";
+const SERVER_URL = "https://lightning-server-935480850831.europe-west3.run.app";
 
 const CHANNELS = [
   { id: 'lightning', label: 'Lightning' },
