@@ -428,15 +428,6 @@ export default function App() {
   return (
     <View style={styles.page}>
 
-      {/* Computation Time Badge */}
-      {timesteps.length > 0 && computedTimeString && (
-        <View style={styles.computedTimeBadge}>
-          <Text style={styles.computedTimeText}>
-            Computed at {computedTimeString} UTC
-          </Text>
-        </View>
-      )}
-
       {/* Search Bar */}
       <View style={styles.searchContainer} data-search-container>
         <TextInput
@@ -460,6 +451,15 @@ export default function App() {
                 </Text>
               </TouchableOpacity>
             ))}
+          </View>
+        )}
+
+        {/* Computation Time Badge - below search bar */}
+        {timesteps.length > 0 && computedTimeString && (
+          <View style={styles.computedTimeBadge}>
+            <Text style={styles.computedTimeText}>
+              Computed at {computedTimeString} UTC
+            </Text>
           </View>
         )}
       </View>
@@ -566,14 +566,12 @@ const styles = StyleSheet.create({
     backgroundColor: '#000' // Changed to black to match theme
   },
   computedTimeBadge: {
-    position: 'absolute',
-    top: 20,
-    left: 10,
+    marginTop: 8,
     backgroundColor: 'rgba(220, 38, 38, 0.9)',
     borderRadius: 8,
     paddingHorizontal: 12,
     paddingVertical: 8,
-    zIndex: 1500,
+    alignSelf: 'center',
   },
   computedTimeText: {
     color: 'white',

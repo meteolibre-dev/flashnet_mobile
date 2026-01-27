@@ -4,6 +4,7 @@ import Slider from '@react-native-community/slider';
 import MapLibreGL from '@maplibre/maplibre-react-native';
 import * as SplashScreen from 'expo-splash-screen';
 import * as Location from 'expo-location';
+import * as Font from 'expo-font';
 
 // Keep the splash screen visible while we fetch resources
 SplashScreen.preventAutoHideAsync();
@@ -138,6 +139,23 @@ export default function App() {
   const [showSearchResults, setShowSearchResults] = useState(false);
   const [isLoading, setIsLoading] = useState(false); // internal, not shown in UI
   const [isAppReady, setIsAppReady] = useState(false);
+  const [fontsLoadedState, setFontsLoadedState] = useState(false);
+
+  // Load custom font for splash screen
+  useEffect(() => {
+    const loadFonts = async () => {
+      try {
+        await Font.loadAsync({
+          'Orbitron': require('./assets/Orbitron-Regular.ttf'),
+        });
+        setFontsLoadedState(true);
+      } catch (e) {
+        console.warn('Font loading failed, using default font:', e);
+        setFontsLoadedState(true); // Still proceed even if font fails
+      }
+    };
+    loadFonts();
+  }, []);
 
   // Layer 0 State
   const [layerUrl, setLayerUrl] = useState<string | null>(null);
@@ -489,7 +507,7 @@ export default function App() {
   return (
     <View style={styles.page}>
       {/* Custom Splash Screen */}
-      {!isAppReady && (
+      {!isAppReady && fontsLoadedState && (
         <View style={styles.splashContainer}>
           <Image source={require('./assets/icon.png')} style={styles.splashLogo} />
           <Text style={styles.splashTitle}>by meteolibre</Text>
@@ -832,5 +850,9 @@ const styles = StyleSheet.create({
     color: '#ffffff',
     fontSize: 16,
     marginTop: 20,
+    fontFamily: 'Orbitron',
+    fontWeight: '900',
+    letterSpacing: 4,
+    textTransform: 'uppercase',
   },
 });
