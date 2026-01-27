@@ -177,46 +177,15 @@ app.get('/metadata', async (req, res) => {
         const maxLon = bbox[2];
         const maxLat = bbox[3];
 
-        // Web Mercator projection correction:
-        // The TIFF uses WGS84 (Geographic) where pixels are spaced linearly by latitude.
-        // MapLibre uses Web Mercator which stretches vertically as latitude increases.
-        // This causes the image to appear shifted northward when displayed.
-        //
-        // The visual center of the Mercator box corresponds to a higher latitude than
-        // the geographic center. To fix this, we need to find the adjusted north
-        // coordinate such that the geographic center maps to the visual center.
-
-        const centerLat = (minLat + maxLat) / 2;
-
-        // Mercator projection functions (Y in meters, φ in degrees)
-        const toMercatorY = (lat) => {
-            const latRad = lat * Math.PI / 180;
-            return R * Math.log((1 + Math.sin(latRad)) / (1 - Math.sin(latRad))) / 2;
-        };
-
-        const fromMercatorY = (y) => {
-            const exp = Math.exp(y / R);
-            return (2 * Math.atan(exp) - Math.PI / 2) * 180 / Math.PI;
-        };
-
-        // We need: visualCenter = (mercator(minLat) + mercator(adjustedNorth)) / 2
-        // And we want visualCenter = mercator(centerLat)
-        // So: mercator(adjustedNorth) = 2 * mercator(centerLat) - mercator(minLat)
-        const minLatMercator = toMercatorY(minLat);
-        const centerLatMercator = toMercatorY(centerLat);
-        const targetNorthMercator = 2 * centerLatMercator - minLatMercator;
-        const adjustedNorth = fromMercatorY(targetNorthMercator);
-
         // MapLibre expects: [ [minX, maxY], [maxX, maxY], [maxX, minY], [minX, minY] ] (TL, TR, BR, BL)
         const coordinates = [
-            [minLon, adjustedNorth], // TL
-            [maxLon, adjustedNorth], // TR
-            [maxLon, minLat],        // BR
-            [minLon, minLat]         // BL
+            [minLon, maxLat], // TL
+            [maxLon, maxLat], // TR
+            [maxLon, minLat], // BR
+            [minLon, minLat]  // BL
         ];
 
-        console.log('Original bounds:', { minLat, maxLat, centerLat });
-        console.log('Adjusted north:', adjustedNorth, '(moved south by', (maxLat - adjustedNorth).toFixed(4), 'degrees)');
+        console.log('Original bounds:', { minLat, maxLat });
 
         res.json({ coordinates });
     } catch (error) {
@@ -256,7 +225,10 @@ app.get('/image', async (req, res) => {
         const image = await tiff.getImage();
         const width = image.getWidth();
         const height = image.getHeight();
-        
+        const bbox = image.getBoundingBox(); // [minX, minY, maxX, maxY]
+        const minLat = bbox[1];
+        const maxLat = bbox[3];
+
         // NoData check
         const fileDirectory = image.getFileDirectory();
         let noDataValue = null;
@@ -269,29 +241,62 @@ app.get('/image', async (req, res) => {
         const rasters = await image.readRasters();
         const data = rasters[0];
 
-        // 4. Generate Buffer
-        const buffer = Buffer.alloc(width * height * 4);
-        
         // Check for vertical flip requirement
         // Standard GeoTIFF (North Up) has scaleY < 0.
-        // If scaleY > 0, it is South Up (bottom-to-top), so we need to flip rows for PNG (top-to-bottom).
         const [scaleX, scaleY] = image.getResolution();
-        const needsFlip = scaleY > 0;
+        const needsSourceFlip = scaleY > 0;
+
+        // 4. Generate Buffer with Mercator Reprojection
+        // The source TIFF has pixels spaced linearly by latitude (WGS84)
+        // The output image needs pixels spaced linearly by Mercator Y (Web Mercator)
+        // This ensures the image aligns correctly when overlaid on the map
+        const buffer = Buffer.alloc(width * height * 4);
+
+        const toMercatorY = (lat) => {
+            const latRad = lat * Math.PI / 180;
+            return R * Math.log((1 + Math.sin(latRad)) / (1 - Math.sin(latRad))) / 2;
+        };
+
+        const fromMercatorY = (y) => {
+            const exp = Math.exp(y / R);
+            return (2 * Math.atan(exp) - Math.PI / 2) * 180 / Math.PI;
+        };
+
+        const yMaxMerc = toMercatorY(maxLat);
+        const yMinMerc = toMercatorY(minLat);
+        const mercHeight = yMaxMerc - yMinMerc;
+
+        console.log(`Mercator reprojection: lat [${minLat.toFixed(4)}, ${maxLat.toFixed(4)}] -> Y [${yMinMerc.toFixed(0)}, ${yMaxMerc.toFixed(0)}]`);
 
         let ptr = 0;
         for (let y = 0; y < height; y++) {
-            const row = needsFlip ? (height - 1 - y) : y;
-            const rowOffset = row * width;
-            
+            // Calculate which Latitude this target row corresponds to in Mercator space
+            const v = y / height; // 0 at top, 1 at bottom
+            const currentMercY = yMaxMerc - v * mercHeight;
+            const currentLat = fromMercatorY(currentMercY);
+
+            // Find corresponding row in source data (Linear Latitude)
+            // sourceV goes 0 (Top/MaxLat) to 1 (Bottom/MinLat)
+            const sourceV = (maxLat - currentLat) / (maxLat - minLat);
+            let sourceRow = Math.floor(sourceV * height);
+            sourceRow = Math.max(0, Math.min(height - 1, sourceRow));
+
+            // Handle vertical flip if source is bottom-up
+            if (needsSourceFlip) {
+                sourceRow = height - 1 - sourceRow;
+            }
+
+            const rowOffset = sourceRow * width;
+
             for (let x = 0; x < width; x++) {
                 let val = data[rowOffset + x];
-                
+
                 if (noDataValue !== null && val === noDataValue) {
                     val = NaN;
                 }
 
                 const [r, g, b, a] = getColor(val, channelId);
-                
+
                 buffer[ptr++] = r;
                 buffer[ptr++] = g;
                 buffer[ptr++] = b;
