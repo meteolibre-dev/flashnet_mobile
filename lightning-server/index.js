@@ -182,22 +182,30 @@ app.get('/metadata', async (req, res) => {
         // MapLibre uses Web Mercator which stretches vertically as latitude increases.
         // This causes the image to appear shifted northward when displayed.
         //
-        // To compensate, we adjust the north coordinate to expand the vertical coverage.
-        // In Mercator, 1 degree of latitude at latitude φ spans: 111320 * cos(φ) meters
-        // But in the output image, each pixel spans the same number of output pixels.
-        // The ratio of geographic degrees per output pixel varies with latitude.
+        // The visual center of the Mercator box corresponds to a higher latitude than
+        // the geographic center. To fix this, we need to find the adjusted north
+        // coordinate such that the geographic center maps to the visual center.
 
         const centerLat = (minLat + maxLat) / 2;
-        const latRange = maxLat - minLat;
 
-        // Calculate the Mercator Y coordinates for the geographic bounds
-        const centerLatRad = centerLat * Math.PI / 180;
-        const mercatorStretch = 1 / Math.cos(centerLatRad);
+        // Mercator projection functions (Y in meters, φ in degrees)
+        const toMercatorY = (lat) => {
+            const latRad = lat * Math.PI / 180;
+            return R * Math.log((1 + Math.sin(latRad)) / (1 - Math.sin(latRad))) / 2;
+        };
 
-        // Expand the north boundary to compensate for Mercator stretching
-        // The geographic north needs to be higher so that when projected to Mercator,
-        // it aligns with the pixel grid of our output image.
-        const adjustedNorth = maxLat + (latRange * (mercatorStretch - 1) / 2);
+        const fromMercatorY = (y) => {
+            const exp = Math.exp(y / R);
+            return (2 * Math.atan(exp) - Math.PI / 2) * 180 / Math.PI;
+        };
+
+        // We need: visualCenter = (mercator(minLat) + mercator(adjustedNorth)) / 2
+        // And we want visualCenter = mercator(centerLat)
+        // So: mercator(adjustedNorth) = 2 * mercator(centerLat) - mercator(minLat)
+        const minLatMercator = toMercatorY(minLat);
+        const centerLatMercator = toMercatorY(centerLat);
+        const targetNorthMercator = 2 * centerLatMercator - minLatMercator;
+        const adjustedNorth = fromMercatorY(targetNorthMercator);
 
         // MapLibre expects: [ [minX, maxY], [maxX, maxY], [maxX, minY], [minX, minY] ] (TL, TR, BR, BL)
         const coordinates = [
@@ -207,8 +215,8 @@ app.get('/metadata', async (req, res) => {
             [minLon, minLat]         // BL
         ];
 
-        console.log('Original bounds:', { minLat, maxLat });
-        console.log('Adjusted north:', adjustedNorth, '(stretch factor:', mercatorStretch.toFixed(4), ')');
+        console.log('Original bounds:', { minLat, maxLat, centerLat });
+        console.log('Adjusted north:', adjustedNorth, '(moved south by', (maxLat - adjustedNorth).toFixed(4), 'degrees)');
 
         res.json({ coordinates });
     } catch (error) {
