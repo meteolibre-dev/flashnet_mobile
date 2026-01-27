@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, useMemo } from 'react';
+import React, { useEffect, useRef, useState, useMemo, useCallback } from 'react';
 import { Platform, StyleSheet, View, Text, TouchableOpacity, TextInput, Animated, Dimensions, Easing, Image } from 'react-native';
 import 'maplibre-gl/dist/maplibre-gl.css';
 
@@ -104,6 +104,67 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [showSearchResults, setShowSearchResults] = useState(false);
+
+  // Computed time (10 minutes before first timestep)
+  const computedTime = useMemo(() => {
+    if (timesteps.length === 0) return null;
+    const firstStep = timesteps[0]?.fullDate;
+    if (!firstStep) return null;
+    return new Date(firstStep.getTime() - 10 * 60 * 1000);
+  }, [timesteps]);
+
+  // Format computed time as HH:MM
+  const computedTimeString = useMemo(() => {
+    if (!computedTime) return '';
+    return computedTime.toLocaleTimeString('en-GB', {
+      hour: '2-digit',
+      minute: '2-digit',
+      timeZone: 'UTC'
+    });
+  }, [computedTime]);
+
+  // Full date string for display
+  const fullDateString = useMemo(() => {
+    if (!selectedStep?.fullDate) return '';
+    return selectedStep.fullDate.toLocaleDateString('en-GB', {
+      day: '2-digit',
+      month: 'short',
+      hour: '2-digit',
+      minute: '2-digit',
+      timeZone: 'UTC'
+    });
+  }, [selectedStep]);
+
+  // Pre-fetch function for better preloading
+  const prefetchTimestep = useCallback(async (step: Timestep) => {
+    if (!step) return;
+    const cacheKey = `${step.filenameTime}_${selectedChannel.id}`;
+    if (prefetchedData[cacheKey]) return;
+
+    try {
+      const tiffUrl = `${BASE_BUCKET_URL}/${step.dateFolder}/forecast_${step.filenameTime}_${selectedChannel.id}.tiff`;
+      const metaUrl = `${SERVER_URL}/metadata?url=${encodeURIComponent(tiffUrl)}`;
+
+      // Fetch metadata
+      const metaRes = await fetch(metaUrl);
+      if (!metaRes.ok) return;
+      const metaData = await metaRes.json();
+
+      const imageUrl = `${SERVER_URL}/image?url=${encodeURIComponent(tiffUrl)}&channel=${selectedChannel.id}`;
+
+      // Store in prefetch cache
+      setPrefetchedData(prev => ({
+        ...prev,
+        [cacheKey]: { url: imageUrl, coordinates: metaData.coordinates }
+      }));
+
+      // Pre-load image into browser cache
+      const img = new (window as any).Image();
+      img.src = imageUrl;
+    } catch (e) {
+      console.warn('Pre-fetch failed', e);
+    }
+  }, [selectedChannel.id, prefetchedData]);
 
   // Splash Screen Logic
   const slideAnim = useRef(new Animated.Value(0)).current;
@@ -272,57 +333,33 @@ export default function App() {
     setShowSearchResults(false);
   };
 
-  // Pre-fetch next logic
+  // Pre-fetch next logic - enhanced for smoother playback
   useEffect(() => {
     if (!selectedStep || timesteps.length === 0) return;
 
     const currentIndex = timesteps.findIndex(s => s.filenameTime === selectedStep.filenameTime);
+
+    // Pre-fetch next 3 timesteps for smoother animation
     const nextSteps = [
         timesteps[(currentIndex + 1) % timesteps.length],
         timesteps[(currentIndex + 2) % timesteps.length],
-    ];
+        timesteps[(currentIndex + 3) % timesteps.length],
+    ].filter(Boolean);
 
-    nextSteps.forEach(async (step) => {
-        const cacheKey = `${step.filenameTime}_${selectedChannel.id}`;
-        if (prefetchedData[cacheKey]) return;
+    // Prefetch in parallel for faster loading
+    Promise.all(nextSteps.map(step => prefetchTimestep(step)));
 
-        try {
-            const tiffUrl = `${BASE_BUCKET_URL}/${step.dateFolder}/forecast_${step.filenameTime}_${selectedChannel.id}.tiff`;
-            const metaUrl = `${SERVER_URL}/metadata?url=${encodeURIComponent(tiffUrl)}`;
-
-            // Fetch metadata
-            const metaRes = await fetch(metaUrl);
-            if (!metaRes.ok) return;
-            const metaData = await metaRes.json();
-
-            const imageUrl = `${SERVER_URL}/image?url=${encodeURIComponent(tiffUrl)}&channel=${selectedChannel.id}`;
-
-            // Store in prefetch cache
-            setPrefetchedData(prev => ({
-                ...prev,
-                [cacheKey]: { url: imageUrl, coordinates: metaData.coordinates }
-            }));
-
-            // Pre-load image into browser cache
-            const img = new (window as any).Image();
-            img.src = imageUrl;
-
-        } catch (e) {
-            console.warn('Pre-fetch failed', e);
-        }
-    });
-
-    // Cleanup old cache entries (keep last 20)
+    // Cleanup old cache entries (keep last 15)
     if (Object.keys(prefetchedData).length > 30) {
         setPrefetchedData(prev => {
             const keys = Object.keys(prev);
             const newCache = { ...prev };
-            keys.slice(0, keys.length - 10).forEach(k => delete newCache[k]);
+            keys.slice(0, keys.length - 15).forEach(k => delete newCache[k]);
             return newCache;
         });
     }
 
-  }, [selectedStep, selectedChannel, timesteps]);
+  }, [selectedStep, selectedChannel, timesteps, prefetchTimestep, prefetchedData]);
 
   // Update layer when selection changes
   useEffect(() => {
@@ -390,6 +427,15 @@ export default function App() {
 
   return (
     <View style={styles.page}>
+
+      {/* Computation Time Badge */}
+      {timesteps.length > 0 && computedTimeString && (
+        <View style={styles.computedTimeBadge}>
+          <Text style={styles.computedTimeText}>
+            Computed at {computedTimeString} UTC
+          </Text>
+        </View>
+      )}
 
       {/* Search Bar */}
       <View style={styles.searchContainer} data-search-container>
@@ -463,7 +509,7 @@ export default function App() {
             <>
               <View style={styles.timeLabels}>
                 <Text style={styles.timeLabel}>{timesteps[0]?.label}</Text>
-                <Text style={styles.currentTimeLabel}>{selectedStep?.label}</Text>
+                <Text style={styles.currentTimeLabel}>{fullDateString}</Text>
                 <Text style={styles.timeLabel}>{timesteps[timesteps.length - 1]?.label}</Text>
               </View>
               <input
@@ -518,6 +564,21 @@ const styles = StyleSheet.create({
     flex: 1,
     height: '100%',
     backgroundColor: '#000' // Changed to black to match theme
+  },
+  computedTimeBadge: {
+    position: 'absolute',
+    top: 20,
+    left: 10,
+    backgroundColor: 'rgba(220, 38, 38, 0.9)',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    zIndex: 1500,
+  },
+  computedTimeText: {
+    color: 'white',
+    fontSize: 12,
+    fontWeight: '600',
   },
   map: {
     flex: 1,

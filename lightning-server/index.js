@@ -170,14 +170,45 @@ app.get('/metadata', async (req, res) => {
         const tiff = await GeoTIFF.fromFile(localPath);
         const image = await tiff.getImage();
         const bbox = image.getBoundingBox(); // [minX, minY, maxX, maxY]
-        
+
+        // Original geographic bounds
+        const minLon = bbox[0];
+        const minLat = bbox[1];
+        const maxLon = bbox[2];
+        const maxLat = bbox[3];
+
+        // Web Mercator projection correction:
+        // The TIFF uses WGS84 (Geographic) where pixels are spaced linearly by latitude.
+        // MapLibre uses Web Mercator which stretches vertically as latitude increases.
+        // This causes the image to appear shifted northward when displayed.
+        //
+        // To compensate, we adjust the north coordinate to expand the vertical coverage.
+        // In Mercator, 1 degree of latitude at latitude φ spans: 111320 * cos(φ) meters
+        // But in the output image, each pixel spans the same number of output pixels.
+        // The ratio of geographic degrees per output pixel varies with latitude.
+
+        const centerLat = (minLat + maxLat) / 2;
+        const latRange = maxLat - minLat;
+
+        // Calculate the Mercator Y coordinates for the geographic bounds
+        const centerLatRad = centerLat * Math.PI / 180;
+        const mercatorStretch = 1 / Math.cos(centerLatRad);
+
+        // Expand the north boundary to compensate for Mercator stretching
+        // The geographic north needs to be higher so that when projected to Mercator,
+        // it aligns with the pixel grid of our output image.
+        const adjustedNorth = maxLat + (latRange * (mercatorStretch - 1) / 2);
+
         // MapLibre expects: [ [minX, maxY], [maxX, maxY], [maxX, minY], [minX, minY] ] (TL, TR, BR, BL)
         const coordinates = [
-            [bbox[0], bbox[3]], // TL
-            [bbox[2], bbox[3]], // TR
-            [bbox[2], bbox[1]], // BR
-            [bbox[0], bbox[1]]  // BL
+            [minLon, adjustedNorth], // TL
+            [maxLon, adjustedNorth], // TR
+            [maxLon, minLat],        // BR
+            [minLon, minLat]         // BL
         ];
+
+        console.log('Original bounds:', { minLat, maxLat });
+        console.log('Adjusted north:', adjustedNorth, '(stretch factor:', mercatorStretch.toFixed(4), ')');
 
         res.json({ coordinates });
     } catch (error) {
