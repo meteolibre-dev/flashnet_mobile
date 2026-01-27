@@ -139,22 +139,14 @@ export default function App() {
   const [showSearchResults, setShowSearchResults] = useState(false);
   const [isLoading, setIsLoading] = useState(false); // internal, not shown in UI
   const [isAppReady, setIsAppReady] = useState(false);
-  const [fontsLoadedState, setFontsLoadedState] = useState(false);
 
   // Load custom font for splash screen
   useEffect(() => {
-    const loadFonts = async () => {
-      try {
-        await Font.loadAsync({
-          'Orbitron': require('./assets/Orbitron-Regular.ttf'),
-        });
-        setFontsLoadedState(true);
-      } catch (e) {
-        console.warn('Font loading failed, using default font:', e);
-        setFontsLoadedState(true); // Still proceed even if font fails
-      }
-    };
-    loadFonts();
+    Font.loadAsync({
+      'Orbitron': require('./assets/Orbitron-Regular.ttf'),
+    }).catch(e => {
+      console.warn('Font loading failed:', e);
+    });
   }, []);
 
   // Layer 0 State
@@ -507,7 +499,7 @@ export default function App() {
   return (
     <View style={styles.page}>
       {/* Custom Splash Screen */}
-      {!isAppReady && fontsLoadedState && (
+      {!isAppReady && (
         <View style={styles.splashContainer}>
           <Image source={require('./assets/icon.png')} style={styles.splashLogo} />
           <Text style={styles.splashTitle}>by meteolibre</Text>
@@ -515,15 +507,6 @@ export default function App() {
       )}
 
       <StatusBar barStyle="light-content" />
-
-      {/* Computation Time Badge */}
-      {timesteps.length > 0 && computedTimeString && (
-        <View style={styles.computedTimeBadge}>
-          <Text style={styles.computedTimeText}>
-            Computed at {computedTimeString} UTC
-          </Text>
-        </View>
-      )}
 
       {/* Search Bar */}
       <View style={styles.searchContainer}>
@@ -548,6 +531,15 @@ export default function App() {
                 </Text>
               </TouchableOpacity>
             ))}
+          </View>
+        )}
+
+        {/* Computation Time Badge - below search bar */}
+        {timesteps.length > 0 && computedTimeString && (
+          <View style={styles.computedTimeBadge}>
+            <Text style={styles.computedTimeText}>
+              Computed at {computedTimeString} UTC
+            </Text>
           </View>
         )}
       </View>
@@ -671,14 +663,12 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   computedTimeBadge: {
-    position: 'absolute',
-    top: Platform.OS === 'android' ? 40 : 50,
-    left: 10,
+    marginTop: 8,
     backgroundColor: 'rgba(220, 38, 38, 0.9)',
     borderRadius: 8,
     paddingHorizontal: 12,
     paddingVertical: 8,
-    zIndex: 1500,
+    alignSelf: 'center',
   },
   computedTimeText: {
     color: 'white',
