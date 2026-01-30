@@ -62,7 +62,7 @@ function tileBounds(z, x, y) {
 
 // Color Ranges and Palettes
 const RANGES = {
-    'lightning': { min: 0, max: 20 },
+    'lightning': { min: 0, max: 4 },
     'sat_ch0': { min: -2, max: 15 },
     'sat_ch1': { min: -3, max: 120 },
 };
