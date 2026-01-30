@@ -2,13 +2,13 @@
   "expo": {
     "name": "FlashNet",
     "slug": "flashnet-y50onk",
-    "version": "1.10.1",
+    "version": "1.11.1",
     "orientation": "portrait",
     "icon": "./public/logo_small.png",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
     "splash": {
-      "image": "./assets/icon.png",
+      "image": "./assets/transparent.png",
       "resizeMode": "contain",
       "backgroundColor": "#000000"
     },
@@ -18,7 +18,7 @@
     },
     "android": {
       "package": "dev.meteolibre.lightningapp",
-      "versionCode": 35,
+      "versionCode": 56,
       "permissions": [
         "INTERNET",
         "ACCESS_COARSE_LOCATION",
@@ -36,6 +36,16 @@
     },
     "plugins": [
       "expo-build-properties",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#000000",
+          "image": "./assets/transparent.png",
+          "android": {
+            "resizeMode": "contain"
+          }
+        }
+      ],
       [
         "@maplibre/maplibre-react-native",
         {

@@ -27,6 +27,7 @@
     "react-dom": "19.1.0",
     "react-map-gl": "^8.1.0",
     "react-native": "0.81.5",
+    "react-native-svg": "^15.15.1",
     "react-native-web": "^0.21.0",
     "text-encoding": "^0.7.0"
   },

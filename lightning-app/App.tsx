@@ -2,23 +2,29 @@ import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { StyleSheet, View, Text, TouchableOpacity, Platform, StatusBar, TextInput, Dimensions, Image } from 'react-native';
 import Slider from '@react-native-community/slider';
 import MapLibreGL from '@maplibre/maplibre-react-native';
+import Svg, { Circle } from 'react-native-svg';
+import * as FileSystem from 'expo-file-system/legacy';
 import * as SplashScreen from 'expo-splash-screen';
 import * as Location from 'expo-location';
 import * as Font from 'expo-font';
+import {
+  scanAvailableTimesteps,
+  downloadAllFrames,
+  fetchMetadata,
+  downloadImage,
+  Timestep,
+  PrefetchedData,
+  CHANNELS,
+  SERVER_URL,
+  BASE_BUCKET_URL,
+  REGION
+} from './dataService';
 
 // Keep the splash screen visible while we fetch resources
 SplashScreen.preventAutoHideAsync();
 
 // Set access token if needed (null for MapLibre/OpenStreetMap)
 MapLibreGL.setAccessToken(null);
-
-// --- Configuration ---
-const REGION = {
-  west: -10.0,
-  north: 65.0,
-  east: 33.0,
-  south: 33.0,
-};
 
 // Free OSM vector style from MapTiler (get free key at https://cloud.maptiler.com/)
 const MAPTILER_API_KEY = 'Jn3KRzqaoa55axAJ3gnp';
@@ -55,78 +61,6 @@ const OSM_RASTER_STYLE = JSON.stringify({
   ]
 });
 
-const BASE_BUCKET_URL = "https://storage.googleapis.com/inference_result/forecasts";
-
-// Production Cloud Run endpoint
-const SERVER_URL = "https://lightning-server-935480850831.europe-west3.run.app";
-
-const CHANNELS = [
-  { id: 'lightning', label: 'Lightning' },
-  { id: 'sat_ch0', label: 'VIS (Ch0)' },
-  { id: 'sat_ch1', label: 'IR (Ch1)' },
-];
-
-interface Timestep {
-  dateFolder: string;
-  filenameTime: string;
-  label: string;
-  fullDate: Date;
-}
-
-interface PrefetchedData {
-  url: string;
-  coordinates: any;
-}
-
-const scanAvailableTimesteps = async (maxTimesteps: number = 18): Promise<Timestep[]> => {
-  const availableTimesteps: Timestep[] = [];
-  const now = new Date();
-  
-  const datesToCheck = [];
-  for (let i = 0; i < 2; i++) {
-    const d = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
-    datesToCheck.push(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`);
-  }
-
-  for (const dateFolder of datesToCheck) {
-    const listUrl = `https://storage.googleapis.com/storage/v1/b/inference_result/o?prefix=forecasts/${dateFolder}/`;
-    try {
-      const response = await fetch(listUrl);
-      if (response.ok) {
-        const data = await response.json();
-        if (data.items) {
-          for (const item of data.items) {
-            const match = item.name.match(/forecast_(\d{12})_lightning\.tiff$/);
-            if (match) {
-              const filenameTime = match[1];
-              const year = filenameTime.substring(0, 4);
-              const month = filenameTime.substring(4, 6);
-              const day = filenameTime.substring(6, 8);
-              const hour = filenameTime.substring(8, 10);
-              const minute = filenameTime.substring(10, 12);
-              
-              const fullDate = new Date(`${year}-${month}-${day}T${hour}:${minute}:00Z`);
-              
-              if (!availableTimesteps.find(s => s.filenameTime === filenameTime)) {
-                availableTimesteps.push({
-                  dateFolder,
-                  filenameTime,
-                  label: `${hour}h${minute}`,
-                  fullDate
-                });
-              }
-            }
-          }
-        }
-      }
-    } catch (error) {
-      console.error(`Error listing files for ${dateFolder}:`, error);
-    }
-  }
-  
-  return availableTimesteps.sort((a, b) => a.fullDate.getTime() - b.fullDate.getTime()).slice(-maxTimesteps);
-};
-
 export default function App() {
   const [timesteps, setTimesteps] = useState<Timestep[]>([]);
   const [selectedStep, setSelectedStep] = useState<Timestep | null>(null);
@@ -139,6 +73,11 @@ export default function App() {
   const [showSearchResults, setShowSearchResults] = useState(false);
   const [isLoading, setIsLoading] = useState(false); // internal, not shown in UI
   const [isAppReady, setIsAppReady] = useState(false);
+
+  // Preloading
+  const [isPreloading, setIsPreloading] = useState(false);
+  const [preloadProgress, setPreloadProgress] = useState(0);
+  const cancelPreloadingRef = useRef(false);
 
   // Load custom font for splash screen
   useEffect(() => {
@@ -162,9 +101,28 @@ export default function App() {
   const [activeLayerIndex, setActiveLayerIndex] = useState(0);
   const [prevActiveLayerIndex, setPrevActiveLayerIndex] = useState<0 | 1 | null>(null);
   const isUpdatingLayer = useRef(false);
+  const activeLayerIndexRef = useRef(0);
+  const latestParamsRef = useRef({ step: selectedStep, channel: selectedChannel });
+  const lastProcessedRef = useRef<string | null>(null);
+
+  // Use ref for prefetchedData to ensure access to latest state inside async loops
+  const prefetchedDataRef = useRef<Record<string, PrefetchedData>>({});
+
+  useEffect(() => {
+    activeLayerIndexRef.current = activeLayerIndex;
+  }, [activeLayerIndex]);
+
+  useEffect(() => {
+    latestParamsRef.current = { step: selectedStep, channel: selectedChannel };
+  }, [selectedStep, selectedChannel]);
 
   // Pre-fetch cache
   const [prefetchedData, setPrefetchedData] = useState<Record<string, PrefetchedData>>({});
+
+  // Sync ref with state
+  useEffect(() => {
+    prefetchedDataRef.current = prefetchedData;
+  }, [prefetchedData]);
 
   const cameraRef = useRef<any>(null);
   const [userLocation, setUserLocation] = useState<[number, number] | null>(null);
@@ -234,6 +192,11 @@ export default function App() {
     getUserLocation();
   }, []);
 
+  // Hide native splash immediately and show custom full-screen splash
+  useEffect(() => {
+    SplashScreen.hideAsync();
+  }, []);
+
   // Initialize Data
   useEffect(() => {
     const initTimesteps = async () => {
@@ -248,9 +211,8 @@ export default function App() {
         console.error('Error scanning timesteps:', error);
       } finally {
         setIsScanning(false);
-        // Additional delay to let splash screen show longer
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        await SplashScreen.hideAsync();
+        // Minimum display time for splash screen (2 seconds)
+        await new Promise(resolve => setTimeout(resolve, 2000));
         setIsAppReady(true);
       }
     };
@@ -267,14 +229,14 @@ export default function App() {
           const nextIndex = (currentIndex + 1) % timesteps.length;
           return timesteps[nextIndex];
         });
-      }, 3000); // 3 seconds to allow satellite images to load
+      }, 500); // 500ms delay per frame
     } else {
       if (playInterval.current) clearInterval(playInterval.current);
     }
     return () => {
       if (playInterval.current) clearInterval(playInterval.current);
     };
-  }, [isPlaying, timesteps, isLoading]);
+  }, [isPlaying, timesteps]);
 
   // Clear hidden layer when it changes (frees MapLibre native memory)
   useEffect(() => {
@@ -365,135 +327,128 @@ export default function App() {
     setShowSearchResults(false);
   };
 
-  // Pre-fetch function for better preloading
-  const prefetchTimestep = useCallback(async (step: Timestep) => {
-    if (!step) return;
-    const cacheKey = `${step.filenameTime}_${selectedChannel.id}`;
-    if (prefetchedData[cacheKey]) return;
+  // Start preload/download sequence
+  const startDownloadSequence = async (steps: Timestep[], channelId: string) => {
+    setIsPreloading(true);
+    setPreloadProgress(0);
+    cancelPreloadingRef.current = false;
 
     try {
-      const tiffUrl = `${BASE_BUCKET_URL}/${step.dateFolder}/forecast_${step.filenameTime}_${selectedChannel.id}.tiff`;
-      const metaUrl = `${SERVER_URL}/metadata?url=${encodeURIComponent(tiffUrl)}`;
+      await downloadAllFrames(
+        steps,
+        channelId,
+        prefetchedDataRef.current,
+        (progress) => setPreloadProgress(progress),
+        () => cancelPreloadingRef.current,
+        Platform.OS === 'web'
+      );
 
-      // Fetch metadata
-      const metaRes = await fetch(metaUrl);
-      if (!metaRes.ok) return;
-      const metaData = await metaRes.json();
+      // Sync state with ref
+      setPrefetchedData({ ...prefetchedDataRef.current });
 
-      const imageUrl = `${SERVER_URL}/image?url=${encodeURIComponent(tiffUrl)}&channel=${selectedChannel.id}`;
-
-      // Store in prefetch cache
-      setPrefetchedData(prev => ({
-        ...prev,
-        [cacheKey]: { url: imageUrl, coordinates: metaData.coordinates }
-      }));
-
-      // Trigger a silent background download to warm the cache
-      fetch(imageUrl, { method: 'HEAD' }).catch(() => {});
-    } catch (e) {
-      console.warn('Pre-fetch failed', e);
+    } catch (error) {
+       console.error('Preload sequence error:', error);
+    } finally {
+      setIsPreloading(false);
+      if (!cancelPreloadingRef.current) {
+        setIsPlaying(true);
+      }
     }
-  }, [selectedChannel.id, prefetchedData]);
+  };
 
-  // Pre-fetch next logic - enhanced for smoother playback
-  useEffect(() => {
-    if (!selectedStep || timesteps.length === 0) return;
-
-    const currentIndex = timesteps.findIndex(s => s.filenameTime === selectedStep.filenameTime);
-
-    // Pre-fetch next 3 timesteps for smoother animation
-    const nextSteps = [
-        timesteps[(currentIndex + 1) % timesteps.length],
-        timesteps[(currentIndex + 2) % timesteps.length],
-        timesteps[(currentIndex + 3) % timesteps.length],
-    ].filter(Boolean);
-
-    // Prefetch in parallel for faster loading
-    Promise.all(nextSteps.map(step => prefetchTimestep(step)));
-
-    // Cleanup old cache entries (keep last 15)
-    if (Object.keys(prefetchedData).length > 30) {
-        setPrefetchedData(prev => {
-            const keys = Object.keys(prev);
-            const newCache = { ...prev };
-            keys.slice(0, keys.length - 15).forEach(k => delete newCache[k]);
-            return newCache;
-        });
+  const handlePlayClick = () => {
+    if (isPreloading) {
+      cancelPreloadingRef.current = true;
+      setIsPreloading(false);
+    } else if (isPlaying) {
+      setIsPlaying(false);
+      cancelPreloadingRef.current = true;
+    } else {
+      startDownloadSequence(timesteps, selectedChannel.id);
     }
-
-  }, [selectedStep, selectedChannel, timesteps, prefetchTimestep, prefetchedData]);
+  };
 
   // Update Layer Logic
   useEffect(() => {
-    const controller = new AbortController();
-
-    const updateLayer = async () => {
-        if (!selectedStep) return;
-
-        // Skip if already updating to prevent overlapping requests
+    const processQueue = async () => {
         if (isUpdatingLayer.current) return;
         isUpdatingLayer.current = true;
-
         setIsLoading(true);
+
         try {
-          const cacheKey = `${selectedStep.filenameTime}_${selectedChannel.id}`;
-          let metaData;
-          let imageUrl;
+            while (true) {
+                const { step, channel } = latestParamsRef.current;
+                if (!step) break;
 
-          if (prefetchedData[cacheKey]) {
-            // Use cached data immediately
-            metaData = prefetchedData[cacheKey];
-            imageUrl = metaData.url;
-          } else {
-            const tiffUrl = `${BASE_BUCKET_URL}/${selectedStep.dateFolder}/forecast_${selectedStep.filenameTime}_${selectedChannel.id}.tiff`;
+                const targetKey = `${step.filenameTime}_${channel.id}`;
+                if (lastProcessedRef.current === targetKey) break;
 
-            // 1. Get Metadata (Coordinates)
-            const metaUrl = `${SERVER_URL}/metadata?url=${encodeURIComponent(tiffUrl)}`;
-            const metaRes = await fetch(metaUrl, { signal: controller.signal });
-            if (!metaRes.ok) throw new Error('Failed to fetch metadata');
-            const data = await metaRes.json();
-            metaData = { coordinates: data.coordinates };
+                try {
+                    const cacheKey = `${step.filenameTime}_${channel.id}`;
+                    let metaData;
+                    let imageUrl;
 
-            // 2. Set Image URL
-            imageUrl = `${SERVER_URL}/image?url=${encodeURIComponent(tiffUrl)}&channel=${selectedChannel.id}`;
-          }
+                    const cached = prefetchedDataRef.current[cacheKey];
 
-          // Double Buffering Logic with Memory Management
-          // We load the new image into the "next" layer slot, then swap.
-          // After swapping, we clear the hidden layer to free memory.
+                    if (cached) {
+                        metaData = cached;
+                        imageUrl = cached.localUri || cached.url;
+                    } else {
+                        const tiffUrl = `${BASE_BUCKET_URL}/${step.dateFolder}/forecast_${step.filenameTime}_${channel.id}.tiff`;
 
-          // Generate unique ID to ensure fresh native source allocation
-          const uniqueId = `src-${Date.now()}`;
+                        // 1. Get Metadata
+                        const data = await fetchMetadata(tiffUrl);
+                        if (!data) throw new Error('Failed to fetch metadata');
+                        metaData = { coordinates: data.coordinates };
 
-          if (activeLayerIndex === 0) {
-             // Set the new layer
-             setNextLayerId(uniqueId);
-             setNextLayerUrl(imageUrl);
-             setNextLayerCoordinates(metaData.coordinates);
-             // Track previous and swap
-             setPrevActiveLayerIndex(0);
-             setActiveLayerIndex(1);
-          } else {
-             // Set the new layer
-             setLayerId(uniqueId);
-             setLayerUrl(imageUrl);
-             setLayerCoordinates(metaData.coordinates);
-             // Track previous and swap
-             setPrevActiveLayerIndex(1);
-             setActiveLayerIndex(0);
-          }
+                        // 2. Download Image
+                        const remoteImageUrl = `${SERVER_URL}/image?url=${encodeURIComponent(tiffUrl)}&channel=${channel.id}`;
 
-        } catch (error) {
-            console.error('Error updating layer:', error);
+                        if (Platform.OS === 'web') {
+                            imageUrl = remoteImageUrl;
+                        } else {
+                            const localUri = `${FileSystem.cacheDirectory}forecasts/${step.filenameTime}_${channel.id}.png`;
+                            const downloaded = await downloadImage(remoteImageUrl, localUri);
+                            if (!downloaded) throw new Error('Download failed');
+                            imageUrl = downloaded;
+                        }
+
+                        // Save to cache
+                        const newData = { url: remoteImageUrl, coordinates: metaData.coordinates, localUri: imageUrl };
+                        prefetchedDataRef.current = { ...prefetchedDataRef.current, [cacheKey]: newData };
+                        setPrefetchedData(prev => ({ ...prev, [cacheKey]: newData }));
+                    }
+
+                    // Double Buffering Logic
+                    const currentActiveIndex = activeLayerIndexRef.current;
+                    if (currentActiveIndex === 0) {
+                        setNextLayerUrl(imageUrl);
+                        setNextLayerCoordinates(metaData.coordinates);
+                        setPrevActiveLayerIndex(0);
+                        setActiveLayerIndex(1);
+                        activeLayerIndexRef.current = 1;
+                    } else {
+                        setLayerUrl(imageUrl);
+                        setLayerCoordinates(metaData.coordinates);
+                        setPrevActiveLayerIndex(1);
+                        setActiveLayerIndex(0);
+                        activeLayerIndexRef.current = 0;
+                    }
+
+                    lastProcessedRef.current = targetKey;
+
+                } catch (error) {
+                    console.error('Error updating layer:', error);
+                    lastProcessedRef.current = targetKey;
+                }
+            }
         } finally {
             setIsLoading(false);
             isUpdatingLayer.current = false;
         }
     };
 
-    updateLayer();
-
-    return () => controller.abort();
+    processQueue();
   }, [selectedStep, selectedChannel]);
 
   return (
@@ -501,8 +456,7 @@ export default function App() {
       {/* Custom Splash Screen */}
       {!isAppReady && (
         <View style={styles.splashContainer}>
-          <Image source={require('./assets/icon.png')} style={styles.splashLogo} />
-          <Text style={styles.splashTitle}>by meteolibre</Text>
+          <Image source={require('./assets/mainimage_highres.png')} style={styles.splashImage} />
         </View>
       )}
 
@@ -600,12 +554,41 @@ export default function App() {
       {/* Controls */}
       <View style={styles.controlsContainer}>
         <View style={styles.controlsRow}>
-            <TouchableOpacity 
-              onPress={() => setIsPlaying(!isPlaying)}
-              style={[styles.playBtn, isPlaying && styles.pauseBtn]}
-            >
-              <Text style={styles.playBtnText}>{isPlaying ? "II" : "▶"}</Text>
-            </TouchableOpacity>
+            <View style={{ width: 60, height: 60, justifyContent: 'center', alignItems: 'center', marginRight: 10 }}>
+              {isPreloading && (
+                <Svg height="60" width="60" style={{ position: 'absolute', transform: [{ rotate: '-90deg' }] }}>
+                  <Circle
+                    cx="30"
+                    cy="30"
+                    r="28"
+                    stroke="rgba(255,255,255,0.2)"
+                    strokeWidth="3"
+                    fill="none"
+                  />
+                  <Circle
+                    cx="30"
+                    cy="30"
+                    r="28"
+                    stroke="#2dd4bf"
+                    strokeWidth="3"
+                    fill="none"
+                    strokeDasharray={`${2 * Math.PI * 28}`}
+                    strokeDashoffset={`${2 * Math.PI * 28 * (1 - preloadProgress)}`}
+                    strokeLinecap="round"
+                  />
+                </Svg>
+              )}
+              <TouchableOpacity
+                onPress={handlePlayClick}
+                style={[styles.playBtn, isPlaying && styles.pauseBtn, { marginRight: 0 }]}
+              >
+                {isPreloading ? (
+                   <Text style={[styles.playBtnText, { fontSize: 11, fontWeight: 'bold' }]}>{Math.round(preloadProgress * 100)}%</Text>
+                ) : (
+                   <Text style={styles.playBtnText}>{isPlaying ? "II" : "▶"}</Text>
+                )}
+              </TouchableOpacity>
+            </View>
 
              <View style={styles.channelRow}>
               {CHANNELS.map((ch) => (
@@ -821,28 +804,13 @@ const styles = StyleSheet.create({
   },
   // Custom Splash Screen
   splashContainer: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: '#000000',
-    justifyContent: 'center',
-    alignItems: 'center',
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: '#000',
     zIndex: 9999,
   },
-  splashLogo: {
-    width: 150,
-    height: 150,
-    resizeMode: 'contain',
-  },
-  splashTitle: {
-    color: '#ffffff',
-    fontSize: 16,
-    marginTop: 20,
-    fontFamily: 'Orbitron',
-    fontWeight: '900',
-    letterSpacing: 4,
-    textTransform: 'uppercase',
+  splashImage: {
+    width: Dimensions.get('screen').width,
+    height: Dimensions.get('screen').height,
+    resizeMode: 'cover',
   },
 });
