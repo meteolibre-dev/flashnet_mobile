@@ -135,6 +135,11 @@ export default function App() {
     return new Date(firstStep.getTime() - 10 * 60 * 1000);
   }, [timesteps]);
 
+  // Point forecast data
+  const [pointForecastData, setPointForecastData] = useState<any>(null);
+  const [pointForecastLoading, setPointForecastLoading] = useState(false);
+  const [showPointForecast, setShowPointForecast] = useState(false);
+
   // Format computed time as HH:MM
   const computedTimeString = useMemo(() => {
     if (!computedTime) return '';
@@ -229,7 +234,7 @@ export default function App() {
           const nextIndex = (currentIndex + 1) % timesteps.length;
           return timesteps[nextIndex];
         });
-      }, 500); // 500ms delay per frame
+      }, 1000); // 1000ms delay per frame
     } else {
       if (playInterval.current) clearInterval(playInterval.current);
     }
@@ -252,7 +257,7 @@ export default function App() {
           setNextLayerCoordinates(null);
         }
         setPrevActiveLayerIndex(null);
-      }, 4000); // Wait 4s before clearing old layer (longer than interval to prevent blanks)
+      }, 3000); // Wait 3s before clearing old layer (longer than interval to prevent blanks)
 
       return () => clearTimeout(timeout);
     }
@@ -314,7 +319,7 @@ export default function App() {
   const selectLocation = (result: any) => {
     const lat = parseFloat(result.lat);
     const lon = parseFloat(result.lon);
-    
+
     if (cameraRef.current) {
         cameraRef.current.setCamera({
             centerCoordinate: [lon, lat],
@@ -325,6 +330,58 @@ export default function App() {
 
     setSearchQuery(result.display_name.split(',')[0]);
     setShowSearchResults(false);
+  };
+
+  // Fetch point forecast data for current location
+  const fetchPointForecast = async (lat: number, lon: number, channel: string = 'lightning') => {
+    setPointForecastLoading(true);
+    try {
+      const url = `${SERVER_URL}/point?lat=${lat}&lon=${lon}&channel=${channel}`;
+      const response = await fetch(url);
+      if (response.ok) {
+        const data = await response.json();
+        setPointForecastData(data);
+        setShowPointForecast(true);
+      } else {
+        console.error('Failed to fetch point forecast');
+      }
+    } catch (error) {
+      console.error('Error fetching point forecast:', error);
+    } finally {
+      setPointForecastLoading(false);
+    }
+  };
+
+  // Handle location button press
+  const handleLocationPress = async () => {
+    if (!userLocation) {
+      // Request location if not available
+      try {
+        const { status } = await Location.requestForegroundPermissionsAsync();
+        if (status !== 'granted') {
+          alert('Location permission is required to show local forecast');
+          return;
+        }
+        const location = await Location.getCurrentPositionAsync({});
+        const { longitude, latitude } = location.coords;
+        if (longitude >= REGION.west && longitude <= REGION.east &&
+            latitude >= REGION.south && latitude <= REGION.north) {
+          setUserLocation([longitude, latitude]);
+          await fetchPointForecast(latitude, longitude, selectedChannel.id);
+        } else {
+          alert('Your location is outside the forecast coverage area');
+        }
+      } catch (error) {
+        console.error('Error getting location:', error);
+      }
+    } else {
+      // Already have location - toggle panel
+      if (showPointForecast) {
+        setShowPointForecast(false);
+      } else {
+        await fetchPointForecast(userLocation[1], userLocation[0], selectedChannel.id);
+      }
+    }
   };
 
   // Start preload/download sequence
@@ -496,7 +553,50 @@ export default function App() {
             </Text>
           </View>
         )}
+
+        {/* Location Button */}
+        <TouchableOpacity
+          style={styles.locationBtn}
+          onPress={handleLocationPress}
+        >
+          <Text style={styles.locationBtnText}>
+            {pointForecastLoading ? '...' : showPointForecast ? '✕' : '📍'}
+          </Text>
+        </TouchableOpacity>
       </View>
+
+      {/* Point Forecast Panel */}
+      {showPointForecast && pointForecastData && (
+        <View style={styles.pointForecastPanel}>
+          <View style={styles.pointForecastHeader}>
+            <Text style={styles.pointForecastTitle}>Lightning Forecast</Text>
+            <Text style={styles.pointForecastSubtitle}>
+              {pointForecastData.coordinates.lat.toFixed(4)}°N, {pointForecastData.coordinates.lon.toFixed(4)}°E
+            </Text>
+          </View>
+
+          <View style={styles.pointForecastData}>
+            {pointForecastData.timesteps.map((step: any, index: number) => (
+              <View key={index} style={styles.pointForecastRow}>
+                <Text style={styles.pointForecastTime}>
+                  {step.timestamp ? `${step.timestamp.substring(8, 10)}:${step.timestamp.substring(10, 12)}` : 'N/A'}
+                </Text>
+                <View style={[styles.pointForecastValue, step.value !== null && step.value >= 1 && styles.pointForecastValueActive]}>
+                  <Text style={[styles.pointForecastValueText, step.value !== null && step.value >= 1 && styles.pointForecastValueTextActive]}>
+                    {step.value !== null ? step.value.toFixed(1) : '--'}
+                  </Text>
+                </View>
+              </View>
+            ))}
+          </View>
+
+          <View style={styles.pointForecastLegend}>
+            <Text style={styles.pointForecastLegendText}>
+              Values: 0-4 (higher = more lightning)
+            </Text>
+          </View>
+        </View>
+      )}
 
       {/* Map */}
       <MapLibreGL.MapView
@@ -812,5 +912,98 @@ const styles = StyleSheet.create({
     width: Dimensions.get('screen').width,
     height: Dimensions.get('screen').height,
     resizeMode: 'cover',
+  },
+  // Location Button
+  locationBtn: {
+    position: 'absolute',
+    right: -180,
+    top: 0,
+    width: 40,
+    height: 40,
+    backgroundColor: 'white',
+    borderRadius: 20,
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 5,
+  },
+  locationBtnText: {
+    fontSize: 18,
+  },
+  // Point Forecast Panel
+  pointForecastPanel: {
+    position: 'absolute',
+    top: Platform.OS === 'android' ? 100 : 110,
+    right: 10,
+    width: 180,
+    backgroundColor: 'rgba(0, 0, 0, 0.9)',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#333',
+    zIndex: 1600,
+    overflow: 'hidden',
+  },
+  pointForecastHeader: {
+    padding: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#333',
+    alignItems: 'center',
+  },
+  pointForecastTitle: {
+    color: 'white',
+    fontSize: 14,
+    fontWeight: 'bold',
+  },
+  pointForecastSubtitle: {
+    color: '#888',
+    fontSize: 10,
+    marginTop: 2,
+  },
+  pointForecastData: {
+    maxHeight: 300,
+    paddingVertical: 8,
+  },
+  pointForecastRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+  },
+  pointForecastTime: {
+    color: '#888',
+    fontSize: 12,
+  },
+  pointForecastValue: {
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    borderRadius: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    minWidth: 45,
+    alignItems: 'center',
+  },
+  pointForecastValueActive: {
+    backgroundColor: 'rgba(255, 200, 0, 0.3)',
+  },
+  pointForecastValueText: {
+    color: '#666',
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+  pointForecastValueTextActive: {
+    color: '#ffcc00',
+  },
+  pointForecastLegend: {
+    padding: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#333',
+    alignItems: 'center',
+  },
+  pointForecastLegendText: {
+    color: '#555',
+    fontSize: 9,
   },
 });

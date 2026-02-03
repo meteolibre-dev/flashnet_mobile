@@ -318,6 +318,104 @@ app.get('/image', async (req, res) => {
     }
 });
 
+// Get lightning data for a specific point (lat, lon) across all timesteps
+app.get('/point', async (req, res) => {
+    const { lat, lon, channel } = req.query;
+    const channelId = channel || 'lightning';
+
+    if (!lat || !lon) {
+        return res.status(400).json({ error: 'Missing lat or lon query parameter' });
+    }
+
+    const latNum = parseFloat(lat);
+    const lonNum = parseFloat(lon);
+
+    if (isNaN(latNum) || isNaN(lonNum)) {
+        return res.status(400).json({ error: 'Invalid lat or lon values' });
+    }
+
+    // Find all cached TIFF files for the requested channel, sorted by time (most recent last in filename)
+    const files = fs.readdirSync(CACHE_DIR)
+        .filter(f => f.endsWith(`_${channelId}.tiff`))
+        .sort()
+        .reverse(); // Most recent first
+
+    if (files.length === 0) {
+        return res.status(404).json({ error: 'No cached TIFF files found' });
+    }
+
+    const results = [];
+
+    for (const filename of files) {
+        const localPath = path.join(CACHE_DIR, filename);
+
+        try {
+            const tiff = await GeoTIFF.fromFile(localPath);
+            const image = await tiff.getImage();
+
+            const bbox = image.getBoundingBox();
+            const tiffMinLon = bbox[0];
+            const tiffMinLat = bbox[1];
+            const tiffMaxLon = bbox[2];
+            const tiffMaxLat = bbox[3];
+            const width = image.getWidth();
+            const height = image.getHeight();
+
+            // Check if point is within this TIFF's bounds
+            if (lonNum >= tiffMinLon && lonNum <= tiffMaxLon &&
+                latNum >= tiffMinLat && latNum <= tiffMaxLat) {
+
+                // Calculate pixel coordinates
+                const px = Math.floor(((lonNum - tiffMinLon) / (tiffMaxLon - tiffMinLon)) * width);
+                const py = Math.floor(((tiffMaxLat - latNum) / (tiffMaxLat - tiffMinLat)) * height);
+
+                // Read single pixel
+                const rasters = await image.readRasters({
+                    window: [px, py, px + 1, py + 1],
+                    width: 1,
+                    height: 1
+                });
+                const value = rasters[0][0];
+
+                // Get NoData value
+                const fileDirectory = image.getFileDirectory();
+                let noDataValue = null;
+                if (fileDirectory.GDAL_NODATA) {
+                    const cleanStr = String(fileDirectory.GDAL_NODATA).replace(/\0/g, '').trim();
+                    noDataValue = cleanStr.toLowerCase() === 'nan' ? NaN : parseFloat(cleanStr);
+                }
+
+                const isNoData = noDataValue !== null && value === noDataValue;
+
+                // Extract timestamp from filename: forecast_YYYYMMDDHHMM_channel.tiff
+                const timeMatch = filename.match(/forecast_(\d{12})_/);
+                const timestamp = timeMatch ? timeMatch[1] : null;
+
+                results.push({
+                    timestamp,
+                    filename,
+                    value: isNoData ? null : value,
+                    isNoData
+                });
+            }
+        } catch (error) {
+            console.error(`Error reading ${filename}:`, error.message);
+            continue;
+        }
+    }
+
+    if (results.length === 0) {
+        return res.status(404).json({ error: 'Point not found in any cached TIFF file' });
+    }
+
+    res.json({
+        channel: channelId,
+        coordinates: { lat: latNum, lon: lonNum },
+        count: results.length,
+        timesteps: results
+    });
+});
+
 app.get('/tiles/:z/:x/:y.png', async (req, res) => {
     const { z, x, y } = req.params;
     const fileUrl = req.query.url;

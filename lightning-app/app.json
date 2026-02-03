@@ -18,7 +18,7 @@
     },
     "android": {
       "package": "dev.meteolibre.lightningapp",
-      "versionCode": 56,
+      "versionCode": 57,
       "permissions": [
         "INTERNET",
         "ACCESS_COARSE_LOCATION",
