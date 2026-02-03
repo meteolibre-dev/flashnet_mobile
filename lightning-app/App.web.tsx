@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState, useMemo, useCallback } from 'react';
-import { Platform, StyleSheet, View, Text, TouchableOpacity, TextInput, Animated, Dimensions, Easing, Image } from 'react-native';
+import { Platform, View, Text, TouchableOpacity, TextInput, Animated, Dimensions, Easing, Image, ScrollView } from 'react-native';
 import 'maplibre-gl/dist/maplibre-gl.css';
+import { webStyles } from './styles';
 
 // --- Configuration ---
 const REGION = {
@@ -88,6 +89,22 @@ const scanAvailableTimesteps = async (maxTimesteps: number = 18): Promise<Timest
   return availableTimesteps.sort((a, b) => a.fullDate.getTime() - b.fullDate.getTime()).slice(-maxTimesteps);
 };
 
+// --- Icons ---
+const MapIcon = ({ active }: { active: boolean }) => (
+  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke={active ? "#fff" : "#666"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6" />
+    <line x1="8" y1="2" x2="8" y2="18" />
+    <line x1="16" y1="6" x2="16" y2="22" />
+  </svg>
+);
+
+const LocationIcon = ({ active }: { active: boolean }) => (
+  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke={active ? "#fff" : "#666"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" />
+    <circle cx="12" cy="10" r="3" />
+  </svg>
+);
+
 export default function App() {
   const [timesteps, setTimesteps] = useState<Timestep[]>([]);
   const [selectedStep, setSelectedStep] = useState<Timestep | null>(null);
@@ -104,6 +121,15 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [showSearchResults, setShowSearchResults] = useState(false);
+
+  // Point Forecast state
+  const [pointForecastData, setPointForecastData] = useState<any>(null);
+  const [pointForecastLoading, setPointForecastLoading] = useState(false);
+  const [showPointForecast, setShowPointForecast] = useState(false);
+  const [userLocation, setUserLocation] = useState<[number, number] | null>(null);
+
+  // Tab state: 'map' or 'local'
+  const [currentTab, setCurrentTab] = useState<'map' | 'local'>('map');
 
   // Computed time (10 minutes before first timestep)
   const computedTime = useMemo(() => {
@@ -134,6 +160,16 @@ export default function App() {
       timeZone: 'UTC'
     });
   }, [selectedStep]);
+
+  const currentIndex = useMemo(() => {
+    if (!selectedStep || timesteps.length === 0) return 0;
+    return timesteps.findIndex(s => s.filenameTime === selectedStep.filenameTime);
+  }, [selectedStep, timesteps]);
+
+  const progressPercent = useMemo(() => {
+    if (timesteps.length <= 1) return 0;
+    return (currentIndex / (timesteps.length - 1)) * 100;
+  }, [currentIndex, timesteps.length]);
 
   // Pre-fetch function for better preloading
   const prefetchTimestep = useCallback(async (step: Timestep) => {
@@ -316,7 +352,6 @@ export default function App() {
     setSearchQuery(text);
     if (text.length >= 2) {
       const debounce = setTimeout(() => searchLocation(text), 700);
-      return () => clearTimeout(debounce);
     } else {
       setSearchResults([]);
       setShowSearchResults(false);
@@ -331,6 +366,54 @@ export default function App() {
     }
     setSearchQuery(result.display_name.split(',')[0]);
     setShowSearchResults(false);
+  };
+
+  const fetchPointForecast = async (lat: number, lon: number, channelId: string) => {
+    try {
+      setPointForecastLoading(true);
+      const response = await fetch(
+        `${SERVER_URL}/point?lat=${lat}&lon=${lon}&channel=${channelId}`
+      );
+      if (response.ok) {
+        const data = await response.json();
+        setPointForecastData(data);
+        setShowPointForecast(true);
+      } else {
+        alert('No forecast data available for this location');
+      }
+    } catch (error) {
+      console.error('Error fetching point forecast:', error);
+      alert('Failed to fetch forecast data');
+    } finally {
+      setPointForecastLoading(false);
+    }
+  };
+
+  const handleLocationPress = async () => {
+    if (!userLocation) {
+      if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(
+          (position) => {
+            const { longitude, latitude } = position.coords;
+            if (longitude >= REGION.west && longitude <= REGION.east &&
+                latitude >= REGION.south && latitude <= REGION.north) {
+              setUserLocation([longitude, latitude]);
+              fetchPointForecast(latitude, longitude, selectedChannel.id);
+            } else {
+              alert('Your location is outside the forecast area (Europe)');
+            }
+          },
+          (error) => {
+            alert('Unable to get your location. Please enable location services.');
+          },
+          { enableHighAccuracy: false, timeout: 10000 }
+        );
+      } else {
+        alert('Geolocation is not supported by your browser');
+      }
+    } else {
+      setShowPointForecast(!showPointForecast);
+    }
   };
 
   // Pre-fetch next logic - enhanced for smoother playback
@@ -426,27 +509,38 @@ export default function App() {
   };
 
   return (
-    <View style={styles.page}>
+    <View style={webStyles.page}>
 
-      {/* Search Bar */}
-      <View style={styles.searchContainer} data-search-container>
-        <TextInput
-          style={styles.searchInput}
-          placeholder="Search location..."
-          placeholderTextColor="#888"
-          value={searchQuery}
-          onChangeText={handleSearchChange}
-          onFocus={() => searchResults.length > 0 && setShowSearchResults(true)}
-        />
+      {/* Search Bar Row */}
+      <View style={webStyles.searchContainer} data-search-container>
+        <View style={webStyles.searchRow}>
+          <TextInput
+            style={webStyles.searchInput}
+            placeholder="Search location..."
+            placeholderTextColor="#888"
+            value={searchQuery}
+            onChangeText={handleSearchChange}
+            onFocus={() => searchResults.length > 0 && setShowSearchResults(true)}
+          />
+          <TouchableOpacity
+            style={webStyles.locationBtn}
+            onPress={handleLocationPress}
+          >
+            <Text style={webStyles.locationBtnText}>
+              {pointForecastLoading ? '...' : showPointForecast ? '✕' : '📍'}
+            </Text>
+          </TouchableOpacity>
+        </View>
+
         {showSearchResults && searchResults.length > 0 && (
-          <View style={styles.searchResults}>
+          <View style={webStyles.searchResults}>
             {searchResults.map((result, index) => (
               <TouchableOpacity
                 key={index}
-                style={styles.searchResultItem}
+                style={webStyles.searchResultItem}
                 onPress={() => selectLocation(result)}
               >
-                <Text style={styles.searchResultText} numberOfLines={1}>
+                <Text style={webStyles.searchResultText} numberOfLines={1}>
                   {result.display_name}
                 </Text>
               </TouchableOpacity>
@@ -456,42 +550,119 @@ export default function App() {
 
         {/* Computation Time Badge - below search bar */}
         {timesteps.length > 0 && computedTimeString && (
-          <View style={styles.computedTimeBadge}>
-            <Text style={styles.computedTimeText}>
+          <View style={webStyles.computedTimeBadge}>
+            <Text style={webStyles.computedTimeText}>
               Computed at {computedTimeString} UTC
             </Text>
           </View>
         )}
       </View>
 
+      {/* Point Forecast Panel */}
+      {showPointForecast && pointForecastData && currentTab === 'map' && (
+        <View style={webStyles.pointForecastPanel}>
+          <View style={webStyles.pointForecastHeader}>
+            <Text style={webStyles.pointForecastTitle}>Lightning Forecast</Text>
+            <Text style={webStyles.pointForecastSubtitle}>
+              {pointForecastData.coordinates.lat.toFixed(4)}°N, {pointForecastData.coordinates.lon.toFixed(4)}°E
+            </Text>
+          </View>
+
+          <ScrollView horizontal style={webStyles.pointForecastData} showsHorizontalScrollIndicator={true}>
+            {pointForecastData.timesteps.map((step: any, index: number) => (
+              <View key={index} style={webStyles.pointForecastColumn}>
+                <Text style={webStyles.pointForecastTime}>
+                  {step.timestamp ? `${step.timestamp.substring(8, 10)}:${step.timestamp.substring(10, 12)}` : 'N/A'}
+                </Text>
+                <View style={[webStyles.pointForecastValue, step.value !== null && step.value >= 1 && webStyles.pointForecastValueActive]}>
+                  <Text style={[webStyles.pointForecastValueText, step.value !== null && step.value >= 1 && webStyles.pointForecastValueTextActive]}>
+                    {step.value !== null ? step.value.toFixed(1) : '--'}
+                  </Text>
+                </View>
+              </View>
+            ))}
+          </ScrollView>
+
+          <View style={webStyles.pointForecastLegend}>
+            <Text style={webStyles.pointForecastLegendText}>
+              Values: 0-4 (higher = more lightning)
+            </Text>
+          </View>
+        </View>
+      )}
+
       {Platform.OS === 'web' ? (
-        <div ref={mapRef} style={styles.map} />
+        <div ref={mapRef} style={webStyles.map} />
       ) : (
-        <View style={styles.map}>
+        <View style={webStyles.map}>
            <Text style={{textAlign:'center', marginTop: 100}}>Map is Web-Only in this prototype</Text>
         </View>
       )}
-      
+
+      {/* Local View */}
+      {currentTab === 'local' && (
+        <View style={webStyles.localView}>
+          <View style={webStyles.localHeader}>
+            <Text style={webStyles.localTitle}>Local Forecast</Text>
+            <Text style={webStyles.localSubtitle}>
+              {userLocation ? `${userLocation[1].toFixed(4)}°N, ${userLocation[0].toFixed(4)}°E` : 'Location not set'}
+            </Text>
+          </View>
+
+          {pointForecastLoading ? (
+            <View style={webStyles.loadingContainer}>
+              <Text style={webStyles.loadingText}>Loading forecast...</Text>
+            </View>
+          ) : pointForecastData ? (
+            <View style={{ flex: 1 }}>
+              <View style={webStyles.localLegend}>
+                <Text style={webStyles.localLegendText}>Lightning Probability (0-4)</Text>
+              </View>
+              <ScrollView horizontal style={webStyles.localScrollView} contentContainerStyle={webStyles.localScrollContent}>
+                {pointForecastData.timesteps.map((step: any, index: number) => (
+                  <View key={index} style={webStyles.localColumn}>
+                    <Text style={webStyles.localTime}>
+                      {step.timestamp ? `${step.timestamp.substring(8, 10)}:${step.timestamp.substring(10, 12)}` : 'N/A'}
+                    </Text>
+                    <View style={[webStyles.localValue, step.value !== null && step.value >= 1 && webStyles.localValueActive]}>
+                      <Text style={[webStyles.localValueText, step.value !== null && step.value >= 1 && webStyles.localValueTextActive]}>
+                        {step.value !== null ? step.value.toFixed(1) : '--'}
+                      </Text>
+                    </View>
+                  </View>
+                ))}
+              </ScrollView>
+            </View>
+          ) : (
+            <View style={webStyles.emptyState}>
+              <Text style={webStyles.emptyStateText}>Press 📍 to get your local forecast</Text>
+            </View>
+          )}
+        </View>
+      )}
+
       {/* Loading overlay removed - smooth playback with existing layer */}
 
-      <View style={styles.controlsContainer}>
+      {/* Controls - Only show on Map tab */}
+      {currentTab === 'map' && (
+      <View style={webStyles.controlsContainer}>
         {/* Channel Selector */}
-        <View style={styles.controlsRow}>
+        <View style={webStyles.controlsRow}>
             <TouchableOpacity 
               onPress={() => setIsPlaying(!isPlaying)}
-              style={[styles.playBtn, isPlaying && styles.pauseBtn]}
+              style={[webStyles.playBtn, isPlaying && webStyles.pauseBtn]}
             >
-              <Text style={styles.playBtnText}>{isPlaying ? "⏸" : "▶"}</Text>
+              <Text style={webStyles.playBtnText}>{isPlaying ? "⏸" : "▶"}</Text>
             </TouchableOpacity>
 
-            <View style={styles.channelRow}>
+            <View style={webStyles.channelRow}>
               {CHANNELS.map((ch) => (
                 <TouchableOpacity
                   key={ch.id}
                   onPress={() => setSelectedChannel(ch)}
-                  style={[styles.channelBtn, selectedChannel.id === ch.id && styles.selectedBtn]}
+                  style={[webStyles.channelBtn, selectedChannel.id === ch.id && webStyles.selectedBtn]}
                 >
-                  <Text style={[styles.btnText, selectedChannel.id === ch.id && styles.selectedBtnText]}>
+                  <Text style={[webStyles.btnText, selectedChannel.id === ch.id && webStyles.selectedBtnText]}>
                     {ch.label}
                   </Text>
                 </TouchableOpacity>
@@ -500,34 +671,30 @@ export default function App() {
         </View>
 
         {/* Timeline Slider */}
-        <View style={styles.timelineContainer}>
+        <View style={webStyles.timelineContainer}>
           {isScanning ? (
-            <Text style={styles.scanningText}>Scanning for available timesteps...</Text>
+            <Text style={webStyles.scanningText}>Scanning for available timesteps...</Text>
           ) : timesteps.length === 0 ? (
-            <Text style={styles.errorText}>No timesteps available</Text>
+            <Text style={webStyles.errorText}>No timesteps available</Text>
           ) : (
             <>
-              <View style={styles.timeLabels}>
-                <Text style={styles.timeLabel}>{timesteps[0]?.label}</Text>
-                <Text style={styles.currentTimeLabel}>{fullDateString}</Text>
-                <Text style={styles.timeLabel}>{timesteps[timesteps.length - 1]?.label}</Text>
+              <View style={webStyles.timeLabels}>
+                <Text style={webStyles.timeLabel}>{timesteps[0]?.label}</Text>
+                <Text style={webStyles.currentTimeLabel}>{fullDateString}</Text>
+                <Text style={webStyles.timeLabel}>{timesteps[timesteps.length - 1]?.label}</Text>
               </View>
               <input
                 type="range"
                 min={0}
                 max={timesteps.length - 1}
                 step={1}
-                value={timesteps.findIndex(s => s.filenameTime === selectedStep?.filenameTime)}
+                value={currentIndex}
                 onChange={(e) => setSelectedStep(timesteps[parseInt(e.target.value)])}
                 style={{
                   width: '100%',
                   height: 8,
                   borderRadius: 4,
-                  background: 'linear-gradient(to right, #007AFF 0%, #007AFF ' +
-                    ((timesteps.findIndex(s => s.filenameTime === selectedStep?.filenameTime) / (timesteps.length - 1)) * 100) +
-                    '%, rgba(255,255,255,0.3) ' +
-                    ((timesteps.findIndex(s => s.filenameTime === selectedStep?.filenameTime) / (timesteps.length - 1)) * 100) +
-                    '%, rgba(255,255,255,0.3) 100%)',
+                  background: `linear-gradient(to right, #007AFF 0%, #007AFF ${progressPercent}%, #444 ${progressPercent}%, #444 100%)`,
                   cursor: 'pointer',
                   appearance: 'none' as any,
                   WebkitAppearance: 'none',
@@ -538,218 +705,54 @@ export default function App() {
           )}
         </View>
       </View>
+      )}
+
+      {/* Bottom Tab Bar */}
+      <View style={webStyles.tabBar}>
+        <TouchableOpacity
+          style={[webStyles.tabItem, currentTab === 'map' && webStyles.tabItemActive]}
+          onPress={() => setCurrentTab('map')}
+        >
+          <View style={webStyles.tabIcon}>
+            <MapIcon active={currentTab === 'map'} />
+          </View>
+          <Text style={[webStyles.tabLabel, currentTab === 'map' && webStyles.tabLabelActive]}>Map</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[webStyles.tabItem, currentTab === 'local' && webStyles.tabItemActive]}
+          onPress={() => {
+            setCurrentTab('local');
+            if (!userLocation) {
+              handleLocationPress();
+            }
+          }}
+        >
+          <View style={webStyles.tabIcon}>
+            <LocationIcon active={currentTab === 'local'} />
+          </View>
+          <Text style={[webStyles.tabLabel, currentTab === 'local' && webStyles.tabLabelActive]}>Local</Text>
+        </TouchableOpacity>
+      </View>
 
       {/* Splash Screen */}
       {isSplashVisible && (
         <Animated.View 
           style={[
-            styles.splashScreen, 
+            webStyles.splashScreen, 
             { transform: [{ translateY: slideAnim }] }
           ]}
         >
           <Image
             source={require('./assets/icon.png')}
-            style={styles.splashLogo}
+            style={webStyles.splashLogo}
             resizeMode="contain"
           />
-          <Text style={styles.splashTitle}>by meteolibre</Text>
+          <Text style={webStyles.splashTitle}>by meteolibre</Text>
         </Animated.View>
       )}
     </View>
   );
 }
 
-const styles = StyleSheet.create({
-  page: {
-    flex: 1,
-    height: '100%',
-    backgroundColor: '#000' // Changed to black to match theme
-  },
-  computedTimeBadge: {
-    marginTop: 8,
-    backgroundColor: 'rgba(220, 38, 38, 0.9)',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    alignSelf: 'center',
-  },
-  computedTimeText: {
-    color: 'white',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  map: {
-    flex: 1,
-    width: '100%',
-    // Removed minHeight to allow flex layout with navbar
-  },
-  searchContainer: {
-    position: 'absolute',
-    top: 20,
-    left: 0,
-    right: 0,
-    alignItems: 'center',
-    zIndex: 1500,
-  },
-  searchInput: {
-    width: '50%',
-    backgroundColor: 'white',
-    borderRadius: 25,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    color: '#333',
-    fontSize: 15,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 4,
-    elevation: 5,
-  },
-  searchResults: {
-    width: '50%',
-    marginTop: 4,
-    backgroundColor: 'white',
-    borderRadius: 12,
-    maxHeight: 200,
-    overflow: 'hidden',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 4,
-    elevation: 5,
-    alignSelf: 'center',
-  },
-  searchResultItem: {
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#eee',
-  },
-  searchResultText: {
-    color: '#333',
-    fontSize: 14,
-  },
-  controlsContainer: {
-    position: 'absolute',
-    bottom: 20,
-    left: 10,
-    right: 10,
-    zIndex: 1000,
-    alignItems: 'center',
-  },
-  controlsRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 10,
-    width: '100%',
-    justifyContent: 'center',
-  },
-  playBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: '#007AFF',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 10,
-    elevation: 4,
-  },
-  pauseBtn: {
-    backgroundColor: '#FF3B30',
-  },
-  playBtnText: {
-    color: 'white',
-    fontSize: 18,
-    fontWeight: 'bold',
-  },
-  channelRow: {
-    flexDirection: 'row',
-    backgroundColor: 'rgba(255,255,255,0.9)',
-    borderRadius: 25,
-    padding: 4,
-    elevation: 4,
-  },
-  channelBtn: {
-    paddingVertical: 8,
-    paddingHorizontal: 16,
-    borderRadius: 20,
-  },
-  selectedBtn: {
-    backgroundColor: '#007AFF',
-    borderColor: '#007AFF',
-  },
-  btnText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#333',
-  },
-  selectedBtnText: {
-    color: 'white',
-  },
-  timelineContainer: {
-    width: '100%',
-    maxWidth: 500,
-    backgroundColor: 'rgba(0,0,0,0.8)',
-    borderRadius: 15,
-    padding: 15,
-    borderWidth: 1,
-    borderColor: '#333',
-  },
-  timeLabels: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 5,
-    marginBottom: 10,
-  },
-  timeLabel: {
-    color: '#888',
-    fontSize: 12,
-  },
-  currentTimeLabel: {
-    color: '#00FFFF',
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
-  scanningText: {
-    color: '#00FFFF',
-    fontSize: 12,
-    fontWeight: '600',
-    paddingVertical: 10,
-    textAlign: 'center',
-  },
-  errorText: {
-    color: '#FF3B30',
-    fontSize: 12,
-    fontWeight: '600',
-    paddingVertical: 10,
-    textAlign: 'center',
-  },
-  splashScreen: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: '#000',
-    justifyContent: 'center',
-    alignItems: 'center',
-    zIndex: 9999,
-  },
-  splashLogo: {
-    width: 150,
-    height: 150,
-    marginBottom: 20,
-  },
-  splashTitle: {
-    fontFamily: 'Orbitron, sans-serif',
-    color: '#00FFFF',
-    fontSize: 48,
-    fontWeight: '900',
-    letterSpacing: 6,
-    textShadowColor: 'rgba(0, 255, 255, 0.8)',
-    textShadowOffset: { width: 0, height: 0 },
-    textShadowRadius: 20,
-    textTransform: 'uppercase',
-  },
-});
+// Styles are imported from ./styles/appWebStyles.ts

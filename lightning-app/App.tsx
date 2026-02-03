@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
-import { StyleSheet, View, Text, TouchableOpacity, Platform, StatusBar, TextInput, Dimensions, Image } from 'react-native';
+import { View, Text, TouchableOpacity, Platform, StatusBar, TextInput, Dimensions, Image, ScrollView } from 'react-native';
 import Slider from '@react-native-community/slider';
 import MapLibreGL from '@maplibre/maplibre-react-native';
 import Svg, { Circle } from 'react-native-svg';
@@ -19,6 +19,7 @@ import {
   BASE_BUCKET_URL,
   REGION
 } from './dataService';
+import { styles } from './styles';
 
 // Keep the splash screen visible while we fetch resources
 SplashScreen.preventAutoHideAsync();
@@ -126,6 +127,9 @@ export default function App() {
 
   const cameraRef = useRef<any>(null);
   const [userLocation, setUserLocation] = useState<[number, number] | null>(null);
+
+  // Tab state: 'map' or 'local'
+  const [currentTab, setCurrentTab] = useState<'map' | 'local'>('map');
 
   // Computed time (10 minutes before first timestep)
   const computedTime = useMemo(() => {
@@ -519,16 +523,27 @@ export default function App() {
 
       <StatusBar barStyle="light-content" />
 
-      {/* Search Bar */}
+      {/* Search Bar Row */}
       <View style={styles.searchContainer}>
-        <TextInput
-          style={styles.searchInput}
-          placeholder="Search location..."
-          placeholderTextColor="#888"
-          value={searchQuery}
-          onChangeText={handleSearchChange}
-          onFocus={() => searchResults.length > 0 && setShowSearchResults(true)}
-        />
+        <View style={styles.searchRow}>
+          <TextInput
+            style={styles.searchInput}
+            placeholder="Search location..."
+            placeholderTextColor="#888"
+            value={searchQuery}
+            onChangeText={handleSearchChange}
+            onFocus={() => searchResults.length > 0 && setShowSearchResults(true)}
+          />
+          <TouchableOpacity
+            style={styles.locationBtn}
+            onPress={handleLocationPress}
+          >
+            <Text style={styles.locationBtnText}>
+              {pointForecastLoading ? '...' : showPointForecast ? '✕' : '📍'}
+            </Text>
+          </TouchableOpacity>
+        </View>
+
         {showSearchResults && searchResults.length > 0 && (
           <View style={styles.searchResults}>
             {searchResults.map((result, index) => (
@@ -553,20 +568,10 @@ export default function App() {
             </Text>
           </View>
         )}
-
-        {/* Location Button */}
-        <TouchableOpacity
-          style={styles.locationBtn}
-          onPress={handleLocationPress}
-        >
-          <Text style={styles.locationBtnText}>
-            {pointForecastLoading ? '...' : showPointForecast ? '✕' : '📍'}
-          </Text>
-        </TouchableOpacity>
       </View>
 
       {/* Point Forecast Panel */}
-      {showPointForecast && pointForecastData && (
+      {showPointForecast && pointForecastData && currentTab === 'map' && (
         <View style={styles.pointForecastPanel}>
           <View style={styles.pointForecastHeader}>
             <Text style={styles.pointForecastTitle}>Lightning Forecast</Text>
@@ -575,9 +580,9 @@ export default function App() {
             </Text>
           </View>
 
-          <View style={styles.pointForecastData}>
+          <ScrollView horizontal style={styles.pointForecastData} showsHorizontalScrollIndicator={true}>
             {pointForecastData.timesteps.map((step: any, index: number) => (
-              <View key={index} style={styles.pointForecastRow}>
+              <View key={index} style={styles.pointForecastColumn}>
                 <Text style={styles.pointForecastTime}>
                   {step.timestamp ? `${step.timestamp.substring(8, 10)}:${step.timestamp.substring(10, 12)}` : 'N/A'}
                 </Text>
@@ -588,7 +593,7 @@ export default function App() {
                 </View>
               </View>
             ))}
-          </View>
+          </ScrollView>
 
           <View style={styles.pointForecastLegend}>
             <Text style={styles.pointForecastLegendText}>
@@ -598,60 +603,105 @@ export default function App() {
         </View>
       )}
 
-      {/* Map */}
-      <MapLibreGL.MapView
-        style={styles.map}
-        mapStyle={CARTOLIGHT_STYLE}
-        logoEnabled={false}
-        attributionEnabled={true}
-      >
-        <MapLibreGL.Camera
-          ref={cameraRef}
-          defaultSettings={{
-            centerCoordinate: [(REGION.west + REGION.east) / 2, (REGION.north + REGION.south) / 2],
-            zoomLevel: 3
-          }}
-          maxBounds={{
-            ne: [REGION.east, REGION.north],
-            sw: [REGION.west, REGION.south]
-          }}
-        />
+      {/* Map View */}
+      {currentTab === 'map' && (
+        <MapLibreGL.MapView
+          style={styles.map}
+          mapStyle={CARTOLIGHT_STYLE}
+          logoEnabled={false}
+          attributionEnabled={true}
+        >
+          <MapLibreGL.Camera
+            ref={cameraRef}
+            defaultSettings={{
+              centerCoordinate: [(REGION.west + REGION.east) / 2, (REGION.north + REGION.south) / 2],
+              zoomLevel: 3
+            }}
+            maxBounds={{
+              ne: [REGION.east, REGION.north],
+              sw: [REGION.west, REGION.south]
+            }}
+          />
 
-        {/* Overlay Layers - Dynamic Order */}
-        {activeLayerIndex === 1 ? (
-          <>
-             {/* Render 0 (Bottom) then 1 (Top) */}
-             {layerUrl && layerCoordinates && (
-               <MapLibreGL.ImageSource id={layerId} coordinates={layerCoordinates} url={layerUrl}>
-                 <MapLibreGL.RasterLayer id={`layer-${layerId}`} style={{ rasterOpacity: 0.8, rasterFadeDuration: 0 }} />
-               </MapLibreGL.ImageSource>
-             )}
-             {nextLayerUrl && nextLayerCoordinates && (
-               <MapLibreGL.ImageSource id={nextLayerId} coordinates={nextLayerCoordinates} url={nextLayerUrl}>
-                 <MapLibreGL.RasterLayer id={`layer-${nextLayerId}`} style={{ rasterOpacity: 0.8, rasterFadeDuration: 0 }} />
-               </MapLibreGL.ImageSource>
-             )}
-          </>
-        ) : (
-          <>
-             {/* Render 1 (Bottom) then 0 (Top) */}
-             {nextLayerUrl && nextLayerCoordinates && (
-               <MapLibreGL.ImageSource id={nextLayerId} coordinates={nextLayerCoordinates} url={nextLayerUrl}>
-                 <MapLibreGL.RasterLayer id={`layer-${nextLayerId}`} style={{ rasterOpacity: 0.8, rasterFadeDuration: 0 }} />
-               </MapLibreGL.ImageSource>
-             )}
-             {layerUrl && layerCoordinates && (
-               <MapLibreGL.ImageSource id={layerId} coordinates={layerCoordinates} url={layerUrl}>
-                 <MapLibreGL.RasterLayer id={`layer-${layerId}`} style={{ rasterOpacity: 0.8, rasterFadeDuration: 0 }} />
-               </MapLibreGL.ImageSource>
-             )}
-          </>
-        )}
-      </MapLibreGL.MapView>
-      
+          {/* Overlay Layers - Dynamic Order */}
+          {activeLayerIndex === 1 ? (
+            <>
+               {/* Render 0 (Bottom) then 1 (Top) */}
+               {layerUrl && layerCoordinates && (
+                 <MapLibreGL.ImageSource id={layerId} coordinates={layerCoordinates} url={layerUrl}>
+                   <MapLibreGL.RasterLayer id={`layer-${layerId}`} style={{ rasterOpacity: 0.8, rasterFadeDuration: 0 }} />
+                 </MapLibreGL.ImageSource>
+               )}
+               {nextLayerUrl && nextLayerCoordinates && (
+                 <MapLibreGL.ImageSource id={nextLayerId} coordinates={nextLayerCoordinates} url={nextLayerUrl}>
+                   <MapLibreGL.RasterLayer id={`layer-${nextLayerId}`} style={{ rasterOpacity: 0.8, rasterFadeDuration: 0 }} />
+                 </MapLibreGL.ImageSource>
+               )}
+            </>
+          ) : (
+            <>
+               {/* Render 1 (Bottom) then 0 (Top) */}
+               {nextLayerUrl && nextLayerCoordinates && (
+                 <MapLibreGL.ImageSource id={nextLayerId} coordinates={nextLayerCoordinates} url={nextLayerUrl}>
+                   <MapLibreGL.RasterLayer id={`layer-${nextLayerId}`} style={{ rasterOpacity: 0.8, rasterFadeDuration: 0 }} />
+                 </MapLibreGL.ImageSource>
+               )}
+               {layerUrl && layerCoordinates && (
+                 <MapLibreGL.ImageSource id={layerId} coordinates={layerCoordinates} url={layerUrl}>
+                   <MapLibreGL.RasterLayer id={`layer-${layerId}`} style={{ rasterOpacity: 0.8, rasterFadeDuration: 0 }} />
+                 </MapLibreGL.ImageSource>
+               )}
+            </>
+          )}
+        </MapLibreGL.MapView>
+      )}
+
+      {/* Local View */}
+      {currentTab === 'local' && (
+        <View style={styles.localView}>
+          <View style={styles.localHeader}>
+            <Text style={styles.localTitle}>Local Forecast</Text>
+            <Text style={styles.localSubtitle}>
+              {userLocation ? `${userLocation[1].toFixed(4)}°N, ${userLocation[0].toFixed(4)}°E` : 'Location not set'}
+            </Text>
+          </View>
+
+          {pointForecastLoading ? (
+            <View style={styles.loadingContainer}>
+              <Text style={styles.loadingText}>Loading forecast...</Text>
+            </View>
+          ) : pointForecastData ? (
+            <View style={{ flex: 1 }}>
+              <View style={styles.localLegend}>
+                <Text style={styles.localLegendText}>Lightning Probability (0-4)</Text>
+              </View>
+              <ScrollView horizontal style={styles.localScrollView} contentContainerStyle={styles.localScrollContent}>
+                {pointForecastData.timesteps.map((step: any, index: number) => (
+                  <View key={index} style={styles.localColumn}>
+                    <Text style={styles.localTime}>
+                      {step.timestamp ? `${step.timestamp.substring(8, 10)}:${step.timestamp.substring(10, 12)}` : 'N/A'}
+                    </Text>
+                    <View style={[styles.localValue, step.value !== null && step.value >= 1 && styles.localValueActive]}>
+                      <Text style={[styles.localValueText, step.value !== null && step.value >= 1 && styles.localValueTextActive]}>
+                        {step.value !== null ? step.value.toFixed(1) : '--'}
+                      </Text>
+                    </View>
+                  </View>
+                ))}
+              </ScrollView>
+            </View>
+          ) : (
+            <View style={styles.emptyState}>
+              <Text style={styles.emptyStateText}>Press 📍 to get your local forecast</Text>
+            </View>
+          )}
+        </View>
+      )}
+
       {/* Remove loading overlay during playback - double buffering prevents blanks */}
 
-      {/* Controls */}
+      {/* Controls - Only show on Map tab */}
+      {currentTab === 'map' && (
       <View style={styles.controlsContainer}>
         <View style={styles.controlsRow}>
             <View style={{ width: 60, height: 60, justifyContent: 'center', alignItems: 'center', marginRight: 10 }}>
@@ -704,7 +754,7 @@ export default function App() {
               ))}
             </View>
         </View>
-        
+
         {/* Timeline Slider */}
         <View style={styles.timelineContainer}>
           {isScanning ? (
@@ -726,284 +776,42 @@ export default function App() {
                 value={timesteps.findIndex(s => s.filenameTime === selectedStep?.filenameTime)}
                 onValueChange={(value) => setSelectedStep(timesteps[Math.round(value)])}
                 minimumTrackTintColor="#007AFF"
-                maximumTrackTintColor="rgba(255,255,255,0.3)"
+                maximumTrackTintColor="#444"
                 thumbTintColor="#007AFF"
               />
             </>
           )}
         </View>
       </View>
+      )}
+
+      {/* Bottom Tab Bar */}
+      <View style={styles.tabBar}>
+        <TouchableOpacity
+          style={[styles.tabItem, currentTab === 'map' && styles.tabItemActive]}
+          onPress={() => setCurrentTab('map')}
+        >
+          <Text style={[styles.tabIcon, currentTab === 'map' && styles.tabIconActive]}>🗺️</Text>
+          <Text style={[styles.tabLabel, currentTab === 'map' && styles.tabLabelActive]}>Map</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.tabItem, currentTab === 'local' && styles.tabItemActive]}
+          onPress={() => {
+            setCurrentTab('local');
+            if (!userLocation) {
+              handleLocationPress();
+            }
+          }}
+        >
+          <Text style={[styles.tabIcon, currentTab === 'local' && styles.tabIconActive]}>📍</Text>
+          <Text style={[styles.tabLabel, currentTab === 'local' && styles.tabLabelActive]}>Local</Text>
+        </TouchableOpacity>
+      </View>
     </View>
   );
 }
 
-const styles = StyleSheet.create({
-  page: {
-    flex: 1,
-    backgroundColor: '#000',
-  },
-  map: {
-    flex: 1,
-  },
-  computedTimeBadge: {
-    marginTop: 8,
-    backgroundColor: 'rgba(220, 38, 38, 0.9)',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    alignSelf: 'center',
-  },
-  computedTimeText: {
-    color: 'white',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  searchContainer: {
-    position: 'absolute',
-    top: Platform.OS === 'android' ? 40 : 50,
-    left: 0,
-    right: 0,
-    alignItems: 'center',
-    zIndex: 1500,
-  },
-  searchInput: {
-    width: '60%',
-    backgroundColor: 'white',
-    borderRadius: 25,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    color: '#333',
-    fontSize: 14,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 4,
-    elevation: 5,
-  },
-  searchResults: {
-    width: '60%',
-    marginTop: 4,
-    backgroundColor: 'white',
-    borderRadius: 12,
-    maxHeight: 200,
-    overflow: 'hidden',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 4,
-    elevation: 5,
-  },
-  searchResultItem: {
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#eee',
-  },
-  searchResultText: {
-    color: '#333',
-    fontSize: 14,
-  },
-  controlsContainer: {
-    position: 'absolute',
-    bottom: 30,
-    left: 10,
-    right: 10,
-    zIndex: 100,
-    alignItems: 'center',
-  },
-  controlsRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.8)',
-    borderRadius: 20,
-    padding: 10,
-    borderWidth: 1,
-    borderColor: '#333',
-    marginBottom: 10,
-  },
-  playBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: '#007AFF',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 10,
-  },
-  pauseBtn: {
-    backgroundColor: '#FF3B30',
-  },
-  playBtnText: {
-    color: 'white',
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
-  channelRow: {
-    flexDirection: 'row',
-    backgroundColor: 'rgba(255,255,255,0.1)',
-    borderRadius: 20,
-    padding: 2,
-  },
-  channelBtn: {
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    borderRadius: 18,
-  },
-  selectedBtn: {
-    backgroundColor: '#007AFF',
-  },
-  btnText: {
-    color: '#888',
-    fontSize: 12,
-  },
-  selectedBtnText: {
-    color: 'white',
-    fontWeight: 'bold',
-  },
-  timelineContainer: {
-    width: '100%',
-    backgroundColor: 'rgba(0,0,0,0.8)',
-    borderRadius: 15,
-    padding: 10,
-    borderWidth: 1,
-    borderColor: '#333',
-  },
-  timeLabels: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 5,
-    marginBottom: 5,
-  },
-  timeLabel: {
-    color: '#888',
-    fontSize: 11,
-    minWidth: 40,
-    textAlign: 'center',
-  },
-  currentTimeLabel: {
-    color: '#007AFF',
-    fontSize: 14,
-    fontWeight: 'bold',
-    minWidth: 50,
-    textAlign: 'center',
-  },
-  slider: {
-    width: '100%',
-    height: 40,
-  },
-  scanningText: {
-    color: '#007AFF',
-    padding: 10,
-    textAlign: 'center',
-  },
-  errorText: {
-    color: '#FF3B30',
-    padding: 10,
-    textAlign: 'center',
-  },
-  // Custom Splash Screen
-  splashContainer: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: '#000',
-    zIndex: 9999,
-  },
-  splashImage: {
-    width: Dimensions.get('screen').width,
-    height: Dimensions.get('screen').height,
-    resizeMode: 'cover',
-  },
-  // Location Button
-  locationBtn: {
-    position: 'absolute',
-    right: -180,
-    top: 0,
-    width: 40,
-    height: 40,
-    backgroundColor: 'white',
-    borderRadius: 20,
-    justifyContent: 'center',
-    alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 4,
-    elevation: 5,
-  },
-  locationBtnText: {
-    fontSize: 18,
-  },
-  // Point Forecast Panel
-  pointForecastPanel: {
-    position: 'absolute',
-    top: Platform.OS === 'android' ? 100 : 110,
-    right: 10,
-    width: 180,
-    backgroundColor: 'rgba(0, 0, 0, 0.9)',
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#333',
-    zIndex: 1600,
-    overflow: 'hidden',
-  },
-  pointForecastHeader: {
-    padding: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#333',
-    alignItems: 'center',
-  },
-  pointForecastTitle: {
-    color: 'white',
-    fontSize: 14,
-    fontWeight: 'bold',
-  },
-  pointForecastSubtitle: {
-    color: '#888',
-    fontSize: 10,
-    marginTop: 2,
-  },
-  pointForecastData: {
-    maxHeight: 300,
-    paddingVertical: 8,
-  },
-  pointForecastRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 4,
-  },
-  pointForecastTime: {
-    color: '#888',
-    fontSize: 12,
-  },
-  pointForecastValue: {
-    backgroundColor: 'rgba(255,255,255,0.1)',
-    borderRadius: 4,
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    minWidth: 45,
-    alignItems: 'center',
-  },
-  pointForecastValueActive: {
-    backgroundColor: 'rgba(255, 200, 0, 0.3)',
-  },
-  pointForecastValueText: {
-    color: '#666',
-    fontSize: 12,
-    fontWeight: 'bold',
-  },
-  pointForecastValueTextActive: {
-    color: '#ffcc00',
-  },
-  pointForecastLegend: {
-    padding: 8,
-    borderTopWidth: 1,
-    borderTopColor: '#333',
-    alignItems: 'center',
-  },
-  pointForecastLegendText: {
-    color: '#555',
-    fontSize: 9,
-  },
-});
+// Styles are imported from ./styles/appStyles.ts
+// - sharedStyles: shared styles used by both native and web
+// - nativeStyles: native-specific styles (splash screen)
