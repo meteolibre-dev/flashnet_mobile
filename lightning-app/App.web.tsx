@@ -549,7 +549,7 @@ export default function App() {
         )}
 
         {/* Computation Time Badge - below search bar */}
-        {timesteps.length > 0 && computedTimeString && (
+        {currentTab === 'map' && timesteps.length > 0 && computedTimeString && (
           <View style={webStyles.computedTimeBadge}>
             <Text style={webStyles.computedTimeText}>
               Computed at {computedTimeString} UTC
@@ -569,7 +569,7 @@ export default function App() {
           </View>
 
           <ScrollView horizontal style={webStyles.pointForecastData} showsHorizontalScrollIndicator={true}>
-            {pointForecastData.timesteps.map((step: any, index: number) => (
+            {pointForecastData.timesteps.slice(-18).reverse().map((step: any, index: number) => (
               <View key={index} style={webStyles.pointForecastColumn}>
                 <Text style={webStyles.pointForecastTime}>
                   {step.timestamp ? `${step.timestamp.substring(8, 10)}:${step.timestamp.substring(10, 12)}` : 'N/A'}
@@ -619,7 +619,7 @@ export default function App() {
                 <Text style={webStyles.localLegendText}>Lightning Probability (0-4)</Text>
               </View>
               <ScrollView horizontal style={webStyles.localScrollView} contentContainerStyle={webStyles.localScrollContent}>
-                {pointForecastData.timesteps.map((step: any, index: number) => (
+                {pointForecastData.timesteps.slice(-18).reverse().map((step: any, index: number) => (
                   <View key={index} style={webStyles.localColumn}>
                     <Text style={webStyles.localTime}>
                       {step.timestamp ? `${step.timestamp.substring(8, 10)}:${step.timestamp.substring(10, 12)}` : 'N/A'}

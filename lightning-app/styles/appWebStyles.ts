@@ -329,20 +329,20 @@ export const webStyles = StyleSheet.create({
   },
   localColumn: {
     alignItems: 'center',
-    paddingHorizontal: 20,
+    paddingHorizontal: 3,
     justifyContent: 'center',
   },
   localTime: {
     color: '#888',
-    fontSize: 16,
+    fontSize: 13,
     marginBottom: 8,
   },
   localValue: {
     backgroundColor: 'rgba(255,255,255,0.1)',
     borderRadius: 6,
-    paddingHorizontal: 12,
+    paddingHorizontal: 6,
     paddingVertical: 6,
-    minWidth: 60,
+    minWidth: 42,
     alignItems: 'center',
   },
   localValueActive: {
@@ -350,7 +350,7 @@ export const webStyles = StyleSheet.create({
   },
   localValueText: {
     color: '#666',
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: 'bold',
   },
   localValueTextActive: {

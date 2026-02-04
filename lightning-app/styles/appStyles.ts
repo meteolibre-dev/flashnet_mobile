@@ -135,19 +135,21 @@ export const styles = StyleSheet.create({
   },
   pointForecastColumn: {
     alignItems: 'center',
-    paddingHorizontal: 12,
+    paddingHorizontal: 4,
   },
   pointForecastTime: {
     color: '#888',
     fontSize: 12,
     marginBottom: 4,
+    minWidth: 45,
+    textAlign: 'center',
   },
   pointForecastValue: {
     backgroundColor: 'rgba(255,255,255,0.1)',
-    borderRadius: 4,
+    borderRadius: 2,
     paddingHorizontal: 8,
     paddingVertical: 2,
-    minWidth: 45,
+    minWidth: 55,
     alignItems: 'center',
   },
   pointForecastValueActive: {
@@ -175,7 +177,7 @@ export const styles = StyleSheet.create({
   // Controls
   controlsContainer: {
     position: 'absolute',
-    bottom: 30,
+    bottom: 100,
     left: 10,
     right: 10,
     zIndex: 100,
@@ -279,6 +281,8 @@ export const styles = StyleSheet.create({
   splashContainer: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: '#000',
+    justifyContent: 'center',
+    alignItems: 'center',
     zIndex: 9999,
   },
   splashImage: {
@@ -286,13 +290,26 @@ export const styles = StyleSheet.create({
     height: height,
     resizeMode: 'cover',
   },
+  splashLogo: {
+    width: 150,
+    height: 150,
+    marginBottom: 20,
+  },
+  splashTitle: {
+    color: '#00FFFF',
+    fontSize: 40,
+    fontWeight: '900',
+    letterSpacing: 4,
+    textTransform: 'uppercase',
+    textAlign: 'center',
+  },
 
   // Local View
   localView: {
     flex: 1,
     backgroundColor: '#111',
     padding: 20,
-    paddingTop: 80,
+    paddingTop: Platform.OS === 'android' ? 140 : 100,
   },
   localHeader: {
     alignItems: 'center',
@@ -323,20 +340,24 @@ export const styles = StyleSheet.create({
   },
   localColumn: {
     alignItems: 'center',
-    paddingHorizontal: 20,
+    paddingHorizontal: 2,
     justifyContent: 'center',
   },
   localTime: {
     color: '#888',
-    fontSize: 16,
+    fontSize: 13,
     marginBottom: 8,
+    minWidth: 45,
+    textAlign: 'center',
   },
   localValue: {
     backgroundColor: 'rgba(255,255,255,0.1)',
-    borderRadius: 6,
-    paddingHorizontal: 12,
+    borderRadius: 2,
+    paddingHorizontal: 4,
     paddingVertical: 6,
-    minWidth: 60,
+    minWidth: 52,
+    aspectRatio: 1,
+    justifyContent: 'center',
     alignItems: 'center',
   },
   localValueActive: {
@@ -344,11 +365,19 @@ export const styles = StyleSheet.create({
   },
   localValueText: {
     color: '#666',
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: 'bold',
   },
   localValueTextActive: {
     color: '#ffcc00',
+  },
+  localScrollView: {
+    flexGrow: 0,
+    marginVertical: 10,
+  },
+  localScrollContent: {
+    paddingHorizontal: 10,
+    alignItems: 'center',
   },
   loadingContainer: {
     flex: 1,
@@ -376,12 +405,12 @@ export const styles = StyleSheet.create({
     backgroundColor: '#1a1a1a',
     borderTopWidth: 1,
     borderTopColor: '#333',
-    paddingBottom: Platform.OS === 'android' ? 10 : 30,
+    paddingBottom: Platform.OS === 'android' ? 6 : 30,
   },
   tabItem: {
     flex: 1,
     alignItems: 'center',
-    paddingVertical: 12,
+    paddingVertical: 8,
   },
   tabItemActive: {
     backgroundColor: 'rgba(255,255,255,0.05)',

@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { View, Text, TouchableOpacity, Platform, StatusBar, TextInput, Dimensions, Image, ScrollView } from 'react-native';
 import Slider from '@react-native-community/slider';
 import MapLibreGL from '@maplibre/maplibre-react-native';
-import Svg, { Circle } from 'react-native-svg';
+import Svg, { Circle, Path, Polygon, Line } from 'react-native-svg';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as SplashScreen from 'expo-splash-screen';
 import * as Location from 'expo-location';
@@ -61,6 +61,22 @@ const OSM_RASTER_STYLE = JSON.stringify({
     }
   ]
 });
+
+// --- Icons ---
+const MapIcon = ({ active }: { active: boolean }) => (
+  <Svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+    <Polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6" stroke={active ? "#fff" : "#666"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+    <Line x1="8" y1="2" x2="8" y2="18" stroke={active ? "#fff" : "#666"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+    <Line x1="16" y1="6" x2="16" y2="22" stroke={active ? "#fff" : "#666"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+  </Svg>
+);
+
+const LocationIcon = ({ active }: { active: boolean }) => (
+  <Svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+    <Path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" stroke={active ? "#fff" : "#666"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+    <Circle cx="12" cy="10" r="3" stroke={active ? "#fff" : "#666"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+  </Svg>
+);
 
 export default function App() {
   const [timesteps, setTimesteps] = useState<Timestep[]>([]);
@@ -517,7 +533,10 @@ export default function App() {
       {/* Custom Splash Screen */}
       {!isAppReady && (
         <View style={styles.splashContainer}>
-          <Image source={require('./assets/mainimage_highres.png')} style={styles.splashImage} />
+          <Image
+            source={require('./assets/mainimage_highres.png')}
+            style={styles.splashImage}
+          />
         </View>
       )}
 
@@ -561,7 +580,7 @@ export default function App() {
         )}
 
         {/* Computation Time Badge - below search bar */}
-        {timesteps.length > 0 && computedTimeString && (
+        {currentTab === 'map' && timesteps.length > 0 && computedTimeString && (
           <View style={styles.computedTimeBadge}>
             <Text style={styles.computedTimeText}>
               Computed at {computedTimeString} UTC
@@ -581,10 +600,10 @@ export default function App() {
           </View>
 
           <ScrollView horizontal style={styles.pointForecastData} showsHorizontalScrollIndicator={true}>
-            {pointForecastData.timesteps.map((step: any, index: number) => (
+            {pointForecastData.timesteps.slice(-18).reverse().map((step: any, index: number) => (
               <View key={index} style={styles.pointForecastColumn}>
                 <Text style={styles.pointForecastTime}>
-                  {step.timestamp ? `${step.timestamp.substring(8, 10)}:${step.timestamp.substring(10, 12)}` : 'N/A'}
+                  {step.timestamp ? `${step.timestamp.substring(8, 10)}:${step.timestamp.substring(10, 12).padEnd(2, '0')}` : 'N/A'}
                 </Text>
                 <View style={[styles.pointForecastValue, step.value !== null && step.value >= 1 && styles.pointForecastValueActive]}>
                   <Text style={[styles.pointForecastValueText, step.value !== null && step.value >= 1 && styles.pointForecastValueTextActive]}>
@@ -676,10 +695,10 @@ export default function App() {
                 <Text style={styles.localLegendText}>Lightning Probability (0-4)</Text>
               </View>
               <ScrollView horizontal style={styles.localScrollView} contentContainerStyle={styles.localScrollContent}>
-                {pointForecastData.timesteps.map((step: any, index: number) => (
+                {pointForecastData.timesteps.slice(-18).reverse().map((step: any, index: number) => (
                   <View key={index} style={styles.localColumn}>
                     <Text style={styles.localTime}>
-                      {step.timestamp ? `${step.timestamp.substring(8, 10)}:${step.timestamp.substring(10, 12)}` : 'N/A'}
+                      {step.timestamp ? `${step.timestamp.substring(8, 10)}:${step.timestamp.substring(10, 12).padEnd(2, '0')}` : 'N/A'}
                     </Text>
                     <View style={[styles.localValue, step.value !== null && step.value >= 1 && styles.localValueActive]}>
                       <Text style={[styles.localValueText, step.value !== null && step.value >= 1 && styles.localValueTextActive]}>
@@ -791,20 +810,22 @@ export default function App() {
           style={[styles.tabItem, currentTab === 'map' && styles.tabItemActive]}
           onPress={() => setCurrentTab('map')}
         >
-          <Text style={[styles.tabIcon, currentTab === 'map' && styles.tabIconActive]}>🗺️</Text>
+          <MapIcon active={currentTab === 'map'} />
           <Text style={[styles.tabLabel, currentTab === 'map' && styles.tabLabelActive]}>Map</Text>
         </TouchableOpacity>
 
         <TouchableOpacity
           style={[styles.tabItem, currentTab === 'local' && styles.tabItemActive]}
           onPress={() => {
+            setIsPlaying(false);
+            cancelPreloadingRef.current = true;
             setCurrentTab('local');
             if (!userLocation) {
               handleLocationPress();
             }
           }}
         >
-          <Text style={[styles.tabIcon, currentTab === 'local' && styles.tabIconActive]}>📍</Text>
+          <LocationIcon active={currentTab === 'local'} />
           <Text style={[styles.tabLabel, currentTab === 'local' && styles.tabLabelActive]}>Local</Text>
         </TouchableOpacity>
       </View>
