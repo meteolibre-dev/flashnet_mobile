@@ -267,7 +267,7 @@ export const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    paddingHorizontal: 5,
+    paddingHorizontal: 20, // Match RainbowSlider SIDE_PADDING
     marginBottom: 5,
   },
   timeLabel: {

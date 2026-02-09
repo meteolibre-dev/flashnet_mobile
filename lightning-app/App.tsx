@@ -145,6 +145,35 @@ export default function App() {
   const cameraRef = useRef<any>(null);
   const [userLocation, setUserLocation] = useState<[number, number] | null>(null);
 
+  // Region boundary GeoJSON
+  const regionGeoJSON = useMemo(() => ({
+    type: 'Feature' as const,
+    geometry: {
+      type: 'Polygon' as const,
+      coordinates: [[
+        [REGION.west, REGION.south],
+        [REGION.east, REGION.south],
+        [REGION.east, REGION.north],
+        [REGION.west, REGION.north],
+        [REGION.west, REGION.south],
+      ]],
+    },
+    properties: {},
+  }), []);
+
+  // User location GeoJSON
+  const userLocationGeoJSON = useMemo(() => {
+    if (!userLocation) return null;
+    return {
+      type: 'Feature' as const,
+      geometry: {
+        type: 'Point' as const,
+        coordinates: userLocation,
+      },
+      properties: {},
+    };
+  }, [userLocation]);
+
   // Tab state: 'map' or 'local'
   const [currentTab, setCurrentTab] = useState<'map' | 'local'>('map');
 
@@ -162,24 +191,19 @@ export default function App() {
   const [showPointForecast, setShowPointForecast] = useState(false);
 
   // Format computed time as HH:MM
-  const computedTimeString = useMemo(() => {
-    if (!computedTime) return '';
-    return computedTime.toLocaleTimeString('en-GB', {
+  const formatTime = useCallback((date: Date | null) => {
+    if (!date) return '';
+    return date.toLocaleTimeString('en-GB', {
       hour: '2-digit',
       minute: '2-digit',
       timeZone: isLocalTime ? undefined : 'UTC'
     });
-  }, [computedTime, isLocalTime]);
+  }, [isLocalTime]);
+
+  const computedTimeString = useMemo(() => formatTime(computedTime), [computedTime, formatTime]);
 
   // Full date string for display (just time)
-  const fullDateString = useMemo(() => {
-    if (!selectedStep?.fullDate) return '';
-    return selectedStep.fullDate.toLocaleTimeString('en-GB', {
-      hour: '2-digit',
-      minute: '2-digit',
-      timeZone: isLocalTime ? undefined : 'UTC'
-    });
-  }, [selectedStep, isLocalTime]);
+  const fullDateString = useMemo(() => formatTime(selectedStep?.fullDate || null), [selectedStep, formatTime]);
 
   // Just the day/month
   const selectedDateString = useMemo(() => {
@@ -674,6 +698,32 @@ export default function App() {
             }}
           />
 
+          {userLocationGeoJSON && (
+            <MapLibreGL.ShapeSource id="userLocationSource" shape={userLocationGeoJSON}>
+              <MapLibreGL.CircleLayer
+                id="userLocationCircle"
+                style={{
+                  circleRadius: 6,
+                  circleColor: '#2dd4bf', // cyan/teal to match themed elements
+                  circleStrokeWidth: 2,
+                  circleStrokeColor: '#ffffff',
+                }}
+              />
+            </MapLibreGL.ShapeSource>
+          )}
+
+          <MapLibreGL.ShapeSource id="regionSource" shape={regionGeoJSON}>
+            <MapLibreGL.LineLayer
+              id="regionBoundary"
+              style={{
+                lineColor: '#ffffff',
+                lineWidth: 2,
+                lineDasharray: [2, 2],
+                lineOpacity: 0.6,
+              }}
+            />
+          </MapLibreGL.ShapeSource>
+
           {/* Overlay Layers - Dynamic Order */}
           {activeLayerIndex === 1 ? (
             <>
@@ -831,9 +881,9 @@ export default function App() {
             <>
               <Text style={styles.dateLabel}>{selectedDateString}</Text>
               <View style={styles.timeLabels}>
-                <Text style={styles.timeLabel}>{timesteps[0]?.label}</Text>
+                <Text style={styles.timeLabel}>{formatTime(timesteps[0]?.fullDate || null)}</Text>
                 <Text style={styles.currentTimeLabel}>{fullDateString}</Text>
-                <Text style={styles.timeLabel}>{timesteps[timesteps.length - 1]?.label}</Text>
+                <Text style={styles.timeLabel}>{formatTime(timesteps[timesteps.length - 1]?.fullDate || null)}</Text>
               </View>
               <RainbowSlider
                 data={timesteps}
