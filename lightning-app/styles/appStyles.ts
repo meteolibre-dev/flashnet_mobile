@@ -93,11 +93,25 @@ export const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 8,
     alignSelf: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
   },
   computedTimeText: {
     color: 'white',
     fontSize: 12,
     fontWeight: '600',
+  },
+  timezoneToggle: {
+    marginLeft: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    borderRadius: 4,
+  },
+  timezoneToggleText: {
+    color: 'white',
+    fontSize: 10,
+    fontWeight: 'bold',
   },
 
   // Point Forecast Panel
@@ -241,6 +255,13 @@ export const styles = StyleSheet.create({
     padding: 10,
     borderWidth: 1,
     borderColor: '#333',
+  },
+  dateLabel: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
+    textAlign: 'center',
+    marginBottom: 4,
   },
   timeLabels: {
     flexDirection: 'row',

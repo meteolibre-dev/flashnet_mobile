@@ -1,8 +1,8 @@
 import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { View, Text, TouchableOpacity, Platform, StatusBar, TextInput, Dimensions, Image, ScrollView } from 'react-native';
-import Slider from '@react-native-community/slider';
 import MapLibreGL from '@maplibre/maplibre-react-native';
 import Svg, { Circle, Path, Polygon, Line } from 'react-native-svg';
+import RainbowSlider from './components/RainbowSlider';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as SplashScreen from 'expo-splash-screen';
 import * as Location from 'expo-location';
@@ -90,6 +90,7 @@ export default function App() {
   const [showSearchResults, setShowSearchResults] = useState(false);
   const [isLoading, setIsLoading] = useState(false); // internal, not shown in UI
   const [isAppReady, setIsAppReady] = useState(false);
+  const [isLocalTime, setIsLocalTime] = useState(true);
 
   // Preloading
   const [isPreloading, setIsPreloading] = useState(false);
@@ -166,21 +167,29 @@ export default function App() {
     return computedTime.toLocaleTimeString('en-GB', {
       hour: '2-digit',
       minute: '2-digit',
-      timeZone: 'UTC'
+      timeZone: isLocalTime ? undefined : 'UTC'
     });
-  }, [computedTime]);
+  }, [computedTime, isLocalTime]);
 
-  // Full date string for display
+  // Full date string for display (just time)
   const fullDateString = useMemo(() => {
     if (!selectedStep?.fullDate) return '';
-    return selectedStep.fullDate.toLocaleDateString('en-GB', {
-      day: '2-digit',
-      month: 'short',
+    return selectedStep.fullDate.toLocaleTimeString('en-GB', {
       hour: '2-digit',
       minute: '2-digit',
-      timeZone: 'UTC'
+      timeZone: isLocalTime ? undefined : 'UTC'
     });
-  }, [selectedStep]);
+  }, [selectedStep, isLocalTime]);
+
+  // Just the day/month
+  const selectedDateString = useMemo(() => {
+    if (!selectedStep?.fullDate) return '';
+    return selectedStep.fullDate.toLocaleDateString('en-GB', {
+      day: 'numeric',
+      month: 'long',
+      timeZone: isLocalTime ? undefined : 'UTC'
+    });
+  }, [selectedStep, isLocalTime]);
 
   // Get user location on mount
   useEffect(() => {
@@ -583,8 +592,16 @@ export default function App() {
         {currentTab === 'map' && timesteps.length > 0 && computedTimeString && (
           <View style={styles.computedTimeBadge}>
             <Text style={styles.computedTimeText}>
-              Computed at {computedTimeString} UTC
+              Computed at {computedTimeString}
             </Text>
+            <TouchableOpacity
+              style={styles.timezoneToggle}
+              onPress={() => setIsLocalTime(!isLocalTime)}
+            >
+              <Text style={styles.timezoneToggleText}>
+                {isLocalTime ? 'Local' : 'UTC'}
+              </Text>
+            </TouchableOpacity>
           </View>
         )}
       </View>
@@ -600,18 +617,33 @@ export default function App() {
           </View>
 
           <ScrollView horizontal style={styles.pointForecastData} showsHorizontalScrollIndicator={true}>
-            {pointForecastData.timesteps.slice(-18).reverse().map((step: any, index: number) => (
-              <View key={index} style={styles.pointForecastColumn}>
-                <Text style={styles.pointForecastTime}>
-                  {step.timestamp ? `${step.timestamp.substring(8, 10)}:${step.timestamp.substring(10, 12).padEnd(2, '0')}` : 'N/A'}
-                </Text>
-                <View style={[styles.pointForecastValue, step.value !== null && step.value >= 1 && styles.pointForecastValueActive]}>
-                  <Text style={[styles.pointForecastValueText, step.value !== null && step.value >= 1 && styles.pointForecastValueTextActive]}>
-                    {step.value !== null ? step.value.toFixed(1) : '--'}
+            {pointForecastData.timesteps.slice(-18).reverse().map((step: any, index: number) => {
+              const date = step.timestamp ? new Date(
+                parseInt(step.timestamp.substring(0, 4)),
+                parseInt(step.timestamp.substring(4, 6)) - 1,
+                parseInt(step.timestamp.substring(6, 8)),
+                parseInt(step.timestamp.substring(8, 10)),
+                parseInt(step.timestamp.substring(10, 12))
+              ) : null;
+              const displayTime = date ? date.toLocaleTimeString('en-GB', {
+                hour: '2-digit',
+                minute: '2-digit',
+                timeZone: isLocalTime ? undefined : 'UTC'
+              }) : 'N/A';
+
+              return (
+                <View key={index} style={styles.pointForecastColumn}>
+                  <Text style={styles.pointForecastTime}>
+                    {displayTime}
                   </Text>
+                  <View style={[styles.pointForecastValue, step.value !== null && step.value >= 1 && styles.pointForecastValueActive]}>
+                    <Text style={[styles.pointForecastValueText, step.value !== null && step.value >= 1 && styles.pointForecastValueTextActive]}>
+                      {step.value !== null ? step.value.toFixed(1) : '--'}
+                    </Text>
+                  </View>
                 </View>
-              </View>
-            ))}
+              );
+            })}
           </ScrollView>
 
           <View style={styles.pointForecastLegend}>
@@ -695,18 +727,33 @@ export default function App() {
                 <Text style={styles.localLegendText}>Lightning Probability (0-4)</Text>
               </View>
               <ScrollView horizontal style={styles.localScrollView} contentContainerStyle={styles.localScrollContent}>
-                {pointForecastData.timesteps.slice(-18).reverse().map((step: any, index: number) => (
-                  <View key={index} style={styles.localColumn}>
-                    <Text style={styles.localTime}>
-                      {step.timestamp ? `${step.timestamp.substring(8, 10)}:${step.timestamp.substring(10, 12).padEnd(2, '0')}` : 'N/A'}
-                    </Text>
-                    <View style={[styles.localValue, step.value !== null && step.value >= 1 && styles.localValueActive]}>
-                      <Text style={[styles.localValueText, step.value !== null && step.value >= 1 && styles.localValueTextActive]}>
-                        {step.value !== null ? step.value.toFixed(1) : '--'}
+                {pointForecastData.timesteps.slice(-18).reverse().map((step: any, index: number) => {
+                  const date = step.timestamp ? new Date(
+                    parseInt(step.timestamp.substring(0, 4)),
+                    parseInt(step.timestamp.substring(4, 6)) - 1,
+                    parseInt(step.timestamp.substring(6, 8)),
+                    parseInt(step.timestamp.substring(8, 10)),
+                    parseInt(step.timestamp.substring(10, 12))
+                  ) : null;
+                  const displayTime = date ? date.toLocaleTimeString('en-GB', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    timeZone: isLocalTime ? undefined : 'UTC'
+                  }) : 'N/A';
+
+                  return (
+                    <View key={index} style={styles.localColumn}>
+                      <Text style={styles.localTime}>
+                        {displayTime}
                       </Text>
+                      <View style={[styles.localValue, step.value !== null && step.value >= 1 && styles.localValueActive]}>
+                        <Text style={[styles.localValueText, step.value !== null && step.value >= 1 && styles.localValueTextActive]}>
+                          {step.value !== null ? step.value.toFixed(1) : '--'}
+                        </Text>
+                      </View>
                     </View>
-                  </View>
-                ))}
+                  );
+                })}
               </ScrollView>
             </View>
           ) : (
@@ -782,21 +829,17 @@ export default function App() {
             <Text style={styles.errorText}>No timesteps</Text>
           ) : (
             <>
+              <Text style={styles.dateLabel}>{selectedDateString}</Text>
               <View style={styles.timeLabels}>
                 <Text style={styles.timeLabel}>{timesteps[0]?.label}</Text>
                 <Text style={styles.currentTimeLabel}>{fullDateString}</Text>
                 <Text style={styles.timeLabel}>{timesteps[timesteps.length - 1]?.label}</Text>
               </View>
-              <Slider
-                style={styles.slider}
-                minimumValue={0}
-                maximumValue={timesteps.length - 1}
-                step={1}
+              <RainbowSlider
+                data={timesteps}
                 value={timesteps.findIndex(s => s.filenameTime === selectedStep?.filenameTime)}
-                onValueChange={(value) => setSelectedStep(timesteps[Math.round(value)])}
-                minimumTrackTintColor="#007AFF"
-                maximumTrackTintColor="#444"
-                thumbTintColor="#007AFF"
+                onChange={(index) => setSelectedStep(timesteps[Math.round(index)])}
+                forecastValues={pointForecastData?.timesteps.slice(-18).reverse().map((s: any) => s.value)}
               />
             </>
           )}
