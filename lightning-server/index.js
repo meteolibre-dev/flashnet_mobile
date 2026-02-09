@@ -586,6 +586,7 @@ async function preCacheLatestTimesteps() {
     }
 
     const availableTimesteps = [];
+    const remoteMetadata = {}; // filename -> { updated, dateFolder }
 
     // Scan for available timesteps
     for (const dateFolder of datesToCheck) {
@@ -596,10 +597,18 @@ async function preCacheLatestTimesteps() {
                 const data = await response.json();
                 if (data.items) {
                     for (const item of data.items) {
-                        const match = item.name.match(/forecast_(\d{12})_lightning\.tiff$/);
+                        const match = item.name.match(/forecast_(\d{12})_(lightning|sat_ch0|sat_ch1)\.tiff$/);
                         if (match) {
                             const filenameTime = match[1];
-                            if (!availableTimesteps.find(s => s.filenameTime === filenameTime)) {
+                            const channel = match[2];
+                            const filename = path.basename(item.name);
+
+                            remoteMetadata[filename] = {
+                                updated: new Date(item.updated),
+                                dateFolder
+                            };
+
+                            if (channel === 'lightning' && !availableTimesteps.find(s => s.filenameTime === filenameTime)) {
                                 availableTimesteps.push({ dateFolder, filenameTime });
                             }
                         }
@@ -615,19 +624,34 @@ async function preCacheLatestTimesteps() {
     availableTimesteps.sort((a, b) => a.filenameTime.localeCompare(b.filenameTime));
     const latestTimesteps = availableTimesteps.slice(-18);
 
-    console.log(`Found ${latestTimesteps.length} latest timesteps. Downloading...`);
+    console.log(`Found ${latestTimesteps.length} latest timesteps. Checking for updates...`);
 
     // Download all channels for each timestep
     const channels = ['lightning', 'sat_ch0', 'sat_ch1'];
     let downloaded = 0;
+    let upToDate = 0;
 
     for (const ts of latestTimesteps) {
         for (const channel of channels) {
             const filename = `forecast_${ts.filenameTime}_${channel}.tiff`;
             const localPath = path.join(CACHE_DIR, filename);
             const url = `${BUCKET_BASE_URL}/${ts.dateFolder}/${filename}`;
+            const remoteInfo = remoteMetadata[filename];
+
+            let shouldDownload = false;
 
             if (!fs.existsSync(localPath)) {
+                shouldDownload = true;
+            } else if (remoteInfo) {
+                const localStat = fs.statSync(localPath);
+                // If remote is newer than local, re-download
+                if (remoteInfo.updated > localStat.mtime) {
+                    console.log(`  Update detected for ${filename} (Remote: ${remoteInfo.updated.toISOString()}, Local: ${localStat.mtime.toISOString()})`);
+                    shouldDownload = true;
+                }
+            }
+
+            if (shouldDownload) {
                 try {
                     console.log(`  Downloading ${filename}...`);
                     const response = await fetch(url);
@@ -640,16 +664,63 @@ async function preCacheLatestTimesteps() {
                     console.error(`  Failed to download ${filename}:`, error.message);
                 }
             } else {
-                console.log(`  ${filename} already cached`);
+                upToDate++;
             }
         }
     }
 
-    console.log(`Pre-caching complete. Downloaded ${downloaded} new files.`);
+    console.log(`Pre-caching complete. Downloaded ${downloaded} files, ${upToDate} already up-to-date.`);
+}
+
+async function cleanImageCache() {
+    console.log('Running image cache cleanup...');
+    try {
+        const files = fs.readdirSync(CACHE_DIR);
+        const pngFiles = files.filter(f => f.endsWith('.png'));
+        let deletedCount = 0;
+
+        for (const pngFile of pngFiles) {
+            const pngPath = path.join(CACHE_DIR, pngFile);
+
+            // Expected format: filename.tiff_channel.png
+            const lastUnderscoreIndex = pngFile.lastIndexOf('_');
+            if (lastUnderscoreIndex === -1) continue;
+
+            const tiffFilename = pngFile.substring(0, lastUnderscoreIndex);
+            const tiffPath = path.join(CACHE_DIR, tiffFilename);
+
+            if (!fs.existsSync(tiffPath)) {
+                console.log(`  Deleting orphaned cache: ${pngFile} (Source TIFF missing)`);
+                fs.unlinkSync(pngPath);
+                deletedCount++;
+            } else {
+                const tiffStat = fs.statSync(tiffPath);
+                const pngStat = fs.statSync(pngPath);
+
+                if (tiffStat.mtime > pngStat.mtime) {
+                    console.log(`  Deleting stale cache: ${pngFile} (Source TIFF updated)`);
+                    fs.unlinkSync(pngPath);
+                    deletedCount++;
+                }
+            }
+        }
+        if (deletedCount > 0) {
+            console.log(`Cleanup complete. Deleted ${deletedCount} files.`);
+        } else {
+            console.log('Cleanup complete. No stale files found.');
+        }
+    } catch (error) {
+        console.error('Error during cache cleanup:', error);
+    }
 }
 
 // Start server
 app.listen(PORT, '0.0.0.0', async () => {
     console.log(`Tile Server running on port ${PORT}`);
+
+    // Run cleanup immediately and then every 10 minutes
+    await cleanImageCache();
+    setInterval(cleanImageCache, 10 * 60 * 1000);
+
     await preCacheLatestTimesteps();
 });
