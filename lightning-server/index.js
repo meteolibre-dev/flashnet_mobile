@@ -722,5 +722,7 @@ app.listen(PORT, '0.0.0.0', async () => {
     await cleanImageCache();
     setInterval(cleanImageCache, 10 * 60 * 1000);
 
+    // Initial pre-cache and then check for updates every 1 minute
     await preCacheLatestTimesteps();
+    setInterval(preCacheLatestTimesteps, 1 * 60 * 1000);
 });
