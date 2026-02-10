@@ -573,6 +573,20 @@ app.get('/tiles/:z/:x/:y.png', async (req, res) => {
     }
 });
 
+app.get('/admin/clear-cache', (req, res) => {
+    try {
+        const files = fs.readdirSync(CACHE_DIR);
+        for (const file of files) {
+            fs.unlinkSync(path.join(CACHE_DIR, file));
+        }
+        console.log(`Manual cache clear: deleted ${files.length} files.`);
+        res.json({ success: true, deletedCount: files.length });
+    } catch (error) {
+        console.error('Manual Cache Clear Error:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
 const BUCKET_BASE_URL = "https://storage.googleapis.com/inference_result/forecasts";
 
 // Pre-cache the last 18 timesteps for all channels at startup
