@@ -432,8 +432,23 @@ app.get('/tiles/:z/:x/:y.png', async (req, res) => {
     // Generate local filename from URL
     const filename = path.basename(new URL(fileUrl).pathname);
     const localPath = path.join(CACHE_DIR, filename);
+    const tileCachePath = path.join(CACHE_DIR, `${filename}_${channelId}_tile_${z}_${x}_${y}.png`);
 
     try {
+        // 0. Check tile cache first
+        if (fs.existsSync(tileCachePath)) {
+            // Check if source TIFF is newer than cached tile
+            if (fs.existsSync(localPath)) {
+                const tileStat = fs.statSync(tileCachePath);
+                const tiffStat = fs.statSync(localPath);
+                if (tiffStat.mtime <= tileStat.mtime) {
+                    res.type('image/png');
+                    res.sendFile(tileCachePath);
+                    return;
+                }
+            }
+        }
+
         // 1. Download if not exists
         if (!fs.existsSync(localPath)) {
             console.log(`Downloading ${filename}...`);
@@ -559,13 +574,13 @@ app.get('/tiles/:z/:x/:y.png', async (req, res) => {
             }
         }
 
-        // 7. Send PNG
-        const png = await sharp(outBuffer, { raw: { width: 256, height: 256, channels: 4 } })
+        // 7. Save to cache and send PNG
+        await sharp(outBuffer, { raw: { width: 256, height: 256, channels: 4 } })
             .png()
-            .toBuffer();
+            .toFile(tileCachePath);
 
         res.type('image/png');
-        res.send(png);
+        res.sendFile(tileCachePath);
 
     } catch (error) {
         console.error('Tile Error:', error);
@@ -696,11 +711,24 @@ async function cleanImageCache() {
         for (const pngFile of pngFiles) {
             const pngPath = path.join(CACHE_DIR, pngFile);
 
-            // Expected format: filename.tiff_channel.png
-            const lastUnderscoreIndex = pngFile.lastIndexOf('_');
-            if (lastUnderscoreIndex === -1) continue;
+            // Determine source TIFF filename
+            // Formats: filename.tiff_channel.png OR filename.tiff_channel_tile_z_x_y.png
+            let tiffFilename;
+            if (pngFile.includes('_tile_')) {
+                // Tile cache: filename.tiff_channel_tile_z_x_y.png
+                const tileMatch = pngFile.match(/^(.+)_tile_\d+_\d+_\d+\.png$/);
+                if (tileMatch) {
+                    tiffFilename = tileMatch[1] + '.tiff';
+                } else {
+                    continue;
+                }
+            } else {
+                // Image cache: filename.tiff_channel.png
+                const lastUnderscoreIndex = pngFile.lastIndexOf('_');
+                if (lastUnderscoreIndex === -1) continue;
+                tiffFilename = pngFile.substring(0, lastUnderscoreIndex);
+            }
 
-            const tiffFilename = pngFile.substring(0, lastUnderscoreIndex);
             const tiffPath = path.join(CACHE_DIR, tiffFilename);
 
             if (!fs.existsSync(tiffPath)) {
