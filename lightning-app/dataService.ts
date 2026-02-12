@@ -23,9 +23,9 @@ export interface Timestep {
   fullDate: Date;
 }
 
-// Helper to parse timesteps
+// Helper to parse timesteps - matches any channel (lightning, sat_ch0, sat_ch1, etc.)
 const parseTimestep = (item: any, dateFolder: string): Timestep | null => {
-  const match = item.name.match(/forecast_(\d{12})_lightning\.tiff$/);
+  const match = item.name.match(/forecast_(\d{12})_[\w-]+\.tiff$/);
   if (match) {
     const filenameTime = match[1];
     const year = filenameTime.substring(0, 4);

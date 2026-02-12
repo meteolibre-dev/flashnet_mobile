@@ -71,6 +71,7 @@ export default function App() {
   const [downloadProgress, setDownloadProgress] = useState(0);
   const playInterval = useRef<NodeJS.Timeout | null>(null);
   const cachedTileUrls = useRef<Map<string, string>>(new Map());
+  const pendingFrame = useRef<boolean>(false); // Track if a frame is waiting to be displayed
 
   // Load custom font for splash screen
   useEffect(() => {
@@ -281,6 +282,7 @@ export default function App() {
         playInterval.current = null;
       }
       setIsPlaying(false);
+      pendingFrame.current = false;
       // Clear cache when stopping - only show current frame
       cachedTileUrls.current.clear();
       setDownloadProgress(0);
@@ -300,11 +302,17 @@ export default function App() {
     setIsPlaying(true);
     let currentIndex = timesteps.findIndex(s => s.filenameTime === selectedStep?.filenameTime);
     if (currentIndex === -1) currentIndex = 0;
+    pendingFrame.current = false; // Reset pending state
 
     playInterval.current = setInterval(() => {
+      // Skip this tick if previous frame is still loading
+      if (pendingFrame.current) {
+        return;
+      }
       currentIndex = (currentIndex + 1) % timesteps.length;
+      pendingFrame.current = true; // Mark that we're waiting for this frame
       setSelectedStep(timesteps[currentIndex]);
-    }, 1000);
+    }, 2000);
 
   }, [isPlaying, selectedChannel.id, timesteps, selectedStep, prefetchTilesForChannel]);
 
@@ -316,6 +324,7 @@ export default function App() {
         playInterval.current = null;
       }
       setIsPlaying(false);
+      pendingFrame.current = false;
       setDownloadProgress(0);
       cachedTileUrls.current.clear();
     }
@@ -432,9 +441,10 @@ export default function App() {
   // Tiles are fetched automatically by MapLibre from the tile server
   const tileUrl = useMemo(() => {
     if (!selectedStep) return null;
+    // Add cache-busting t parameter based on filenameTime to force fresh tiles
     const url = `${SERVER_URL}/tiles/{z}/{x}/{y}.png?url=${encodeURIComponent(
       `${BASE_BUCKET_URL}/${selectedStep.dateFolder}/forecast_${selectedStep.filenameTime}_${selectedChannel.id}.tiff`
-    )}&channel=${selectedChannel.id}`;
+    )}&channel=${selectedChannel.id}&t=${selectedStep.filenameTime}`;
 
     console.log('[TileDebug] Generated Tile URL Template:', url);
     return url;
@@ -444,6 +454,7 @@ export default function App() {
   useEffect(() => {
     if (tileUrl && tileUrl !== lastProcessedUrl.current) {
       lastProcessedUrl.current = tileUrl;
+      // Update the buffer with new tile URL
       setActiveLayerIndex(current => {
         const nextIndex = current === 0 ? 1 : 0;
         setBufferUrls(prev => {
@@ -453,6 +464,10 @@ export default function App() {
         });
         return nextIndex;
       });
+      // Delay clearing pending state to give tiles time to render
+      setTimeout(() => {
+        pendingFrame.current = false;
+      }, 1500);
     }
   }, [tileUrl]);
 
@@ -626,7 +641,7 @@ export default function App() {
 
             return (
               <MapLibreGL.RasterSource
-                key={`forecast-source-${idx}-${selectedChannel.id}`}
+                key={`forecast-source-${idx}-${selectedChannel.id}-${url.slice(-50)}`}
                 id={`forecast-source-${idx}`}
                 tileUrlTemplates={[url]}
                 tileSize={256}
@@ -706,31 +721,28 @@ export default function App() {
       {/* Controls - Only show on Map tab */}
       {currentTab === 'map' && (
       <View style={styles.controlsContainer}>
+        {/* Channel Selection + Play Button Row */}
         <View style={styles.controlsRow}>
-             <View style={styles.channelRow}>
-              {CHANNELS.map((ch) => (
-                <TouchableOpacity
-                  key={ch.id}
-                  onPress={() => setSelectedChannel(ch)}
-                  style={[styles.channelBtn, selectedChannel.id === ch.id && styles.selectedBtn]}
-                >
-                  <Text style={[styles.btnText, selectedChannel.id === ch.id && styles.selectedBtnText]}>
-                    {ch.label}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-        </View>
-
-        {/* Play Button Row */}
-        <View style={styles.playButtonRow}>
           <PlayButton
             isPlaying={isPlaying}
             isDownloading={isDownloading}
             progress={downloadProgress}
             onPress={handlePlayPress}
-            size={50}
+            size={40}
           />
+          <View style={styles.channelRow}>
+            {CHANNELS.map((ch) => (
+              <TouchableOpacity
+                key={ch.id}
+                onPress={() => setSelectedChannel(ch)}
+                style={[styles.channelBtn, selectedChannel.id === ch.id && styles.selectedBtn]}
+              >
+                <Text style={[styles.btnText, selectedChannel.id === ch.id && styles.selectedBtnText]}>
+                  {ch.label}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
         </View>
 
         {/* Timeline Slider */}

@@ -1,6 +1,6 @@
 import React from 'react';
-import { View, TouchableOpacity, StyleSheet } from 'react-native';
-import Svg, { Circle, Path, G } from 'react-native-svg';
+import { TouchableOpacity, StyleSheet, Text } from 'react-native';
+import Svg, { Circle, Path, G, Text as SvgText } from 'react-native-svg';
 
 interface PlayButtonProps {
   isPlaying: boolean;
@@ -49,17 +49,20 @@ const PlayButton: React.FC<PlayButtonProps> = ({
   // Download/spinner state
   const renderContent = () => {
     if (isDownloading) {
-      // Show a simple loading indicator
+      // Show percentage text during download using SVG Text
+      const percentage = Math.round(progress * 100);
       return (
-        <Circle
-          cx={center}
-          cy={center}
-          r={5 * iconScale}
-          fill="none"
-          stroke="white"
-          strokeWidth={2}
-          strokeDasharray={`${4 * iconScale} ${4 * iconScale}`}
-        />
+        <SvgText
+          x={center - 2}
+          y={center}
+          fill="white"
+          fontSize={Math.round(12 * iconScale)}
+          fontWeight="bold"
+          textAnchor="middle"
+          alignmentBaseline="central"
+        >
+          {percentage}%
+        </SvgText>
       );
     }
     return isPlaying ? renderPauseIcon() : renderPlayIcon();

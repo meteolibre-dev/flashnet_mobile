@@ -200,9 +200,11 @@ export const styles = StyleSheet.create({
   controlsRow: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
     backgroundColor: 'rgba(0,0,0,0.8)',
     borderRadius: 20,
-    padding: 10,
+    padding: 8,
+    paddingLeft: 12,
     borderWidth: 1,
     borderColor: '#333',
     marginBottom: 10,
