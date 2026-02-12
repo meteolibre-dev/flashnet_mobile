@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState, useMemo, useCallback } from 'react'
 import { Platform, View, Text, TouchableOpacity, TextInput, Animated, Dimensions, Easing, Image, ScrollView } from 'react-native';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { webStyles } from './styles';
+import PlayButton from './components/PlayButton';
 
 // --- Configuration ---
 const REGION = {
@@ -116,6 +117,13 @@ export default function App() {
 
   // Double buffering for smooth playback
   const [activeLayerIndex, setActiveLayerIndex] = useState(0);
+
+  // Playback state
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState(0);
+  const playInterval = useRef<NodeJS.Timeout | null>(null);
+  const cachedTileUrls = useRef<Map<string, string>>(new Map());
 
   // Pre-fetch cache
   const [prefetchedData, setPrefetchedData] = useState<Record<string, PrefetchedData>>({});
@@ -236,7 +244,7 @@ export default function App() {
               source: `forecast-source-${idx}`,
               paint: {
                 'raster-opacity': 0,
-                'raster-fade-duration': 500
+                'raster-fade-duration': 0  // No fade to prevent ghost frames
               }
             });
           });
@@ -301,7 +309,135 @@ export default function App() {
     initTimesteps();
   }, []);
 
-  // Playback Logic removed - manual slider control only
+  // Prefetch tiles for all timesteps
+  const prefetchTilesForChannel = useCallback(async (channelId: string) => {
+    if (timesteps.length === 0) return;
+
+    setIsDownloading(true);
+    setDownloadProgress(0);
+
+    // Get current map bounds to download tiles for visible area
+    const map = mapInstance.current;
+    let bounds: any = null;
+    let minZoom = 2;
+    let maxZoom = 6;
+
+    if (map) {
+      bounds = map.getBounds();
+      minZoom = Math.max(2, Math.floor(map.getZoom()) - 1);
+      maxZoom = Math.min(8, Math.ceil(map.getZoom()) + 2);
+    } else {
+      // Default to Europe region
+      bounds = { _sw: { lng: REGION.west, lat: REGION.south }, _ne: { lng: REGION.east, lat: REGION.north } };
+    }
+
+    const totalSteps = timesteps.length;
+    let completedSteps = 0;
+
+    // Generate tile URLs for all timesteps
+    for (const step of timesteps) {
+      const tiffUrl = `${BASE_BUCKET_URL}/${step.dateFolder}/forecast_${step.filenameTime}_${channelId}.tiff`;
+      const tileUrlTemplate = `${SERVER_URL}/tiles/{z}/{x}/{y}.png?url=${encodeURIComponent(tiffUrl)}&channel=${channelId}`;
+
+      // Store in cache map
+      cachedTileUrls.current.set(step.filenameTime, tileUrlTemplate);
+
+      // Download all tiles for visible region at multiple zoom levels
+      try {
+        const warmupPromises: Promise<void>[] = [];
+
+        for (let z = minZoom; z <= maxZoom; z++) {
+          // Calculate tile coordinates for bounds
+          const n = Math.pow(2, z);
+          const minTileX = Math.max(0, Math.floor((bounds._sw.lng + 180) / 360 * n));
+          const maxTileX = Math.min(n - 1, Math.floor((bounds._ne.lng + 180) / 360 * n));
+          const minTileY = Math.max(0, Math.floor((1 - Math.log(Math.tan(bounds._ne.lat * Math.PI / 180) + 1 / Math.cos(bounds._ne.lat * Math.PI / 180)) / Math.PI) / 2 * n));
+          const maxTileY = Math.min(n - 1, Math.floor((1 - Math.log(Math.tan(bounds._sw.lat * Math.PI / 180) + 1 / Math.cos(bounds._sw.lat * Math.PI / 180)) / Math.PI) / 2 * n));
+
+          for (let x = minTileX; x <= maxTileX; x++) {
+            for (let y = minTileY; y <= maxTileY; y++) {
+              const tileUrl = tileUrlTemplate.replace('{z}', String(z)).replace('{x}', String(x)).replace('{y}', String(y));
+              warmupPromises.push(
+                fetch(tileUrl).then(r => r.blob()).then(() => {}).catch(() => {})
+              );
+            }
+          }
+        }
+
+        // Download in parallel with concurrency limit
+        const batchSize = 10;
+        for (let i = 0; i < warmupPromises.length; i += batchSize) {
+          await Promise.all(warmupPromises.slice(i, i + batchSize));
+        }
+      } catch (error) {
+        console.log('Cache warmup error:', error);
+      }
+
+      completedSteps++;
+      setDownloadProgress(completedSteps / totalSteps);
+    }
+
+    setIsDownloading(false);
+  }, [timesteps]);
+
+  // Handle play button press
+  const handlePlayPress = useCallback(async () => {
+    if (isPlaying) {
+      // Stop playback - clear cache and reset state
+      if (playInterval.current) {
+        clearInterval(playInterval.current);
+        playInterval.current = null;
+      }
+      setIsPlaying(false);
+      // Clear all caches when stopping - only show current frame
+      cachedTileUrls.current.clear();
+      setPrefetchedData({});
+      setDownloadProgress(0);
+      return;
+    }
+
+    // Check if we need to download
+    const hasCache = cachedTileUrls.current.has(timesteps[0]?.filenameTime);
+
+    if (!hasCache) {
+      // Download tiles first
+      await prefetchTilesForChannel(selectedChannel.id);
+    }
+
+    // Start playback
+    setIsPlaying(true);
+    let currentIndex = timesteps.findIndex(s => s.filenameTime === selectedStep?.filenameTime);
+    if (currentIndex === -1) currentIndex = 0;
+
+    playInterval.current = setInterval(() => {
+      currentIndex = (currentIndex + 1) % timesteps.length;
+      setSelectedStep(timesteps[currentIndex]);
+    }, 1000);
+
+  }, [isPlaying, selectedChannel.id, timesteps, selectedStep, prefetchTilesForChannel]);
+
+  // Stop playback when channel changes
+  useEffect(() => {
+    if (isPlaying) {
+      if (playInterval.current) {
+        clearInterval(playInterval.current);
+        playInterval.current = null;
+      }
+      setIsPlaying(false);
+      setDownloadProgress(0);
+      cachedTileUrls.current.clear();
+      setPrefetchedData({});
+    }
+  }, [selectedChannel.id]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (playInterval.current) {
+        clearInterval(playInterval.current);
+      }
+    };
+  }, []);
 
   const searchLocation = async (query: string) => {
     if (!query.trim()) {
@@ -406,9 +542,10 @@ export default function App() {
 
   // Playback functionality removed - manual slider control only
 
-  // Pre-fetch next logic - enhanced for smoother playback
+  // Pre-fetch next logic - only when playing
   useEffect(() => {
-    if (!selectedStep || timesteps.length === 0) return;
+    // Only cache data when actively playing
+    if (!isPlaying || !selectedStep || timesteps.length === 0) return;
 
     const currentIndex = timesteps.findIndex(s => s.filenameTime === selectedStep.filenameTime);
 
@@ -432,7 +569,7 @@ export default function App() {
         });
     }
 
-  }, [selectedStep, selectedChannel, timesteps, prefetchTimestep, prefetchedData]);
+  }, [isPlaying, selectedStep, selectedChannel, timesteps, prefetchTimestep, prefetchedData]);
 
   // Update layer when selection changes
   useEffect(() => {
@@ -462,19 +599,38 @@ export default function App() {
       if (source) {
         source.setTiles([tileUrlTemplate]);
 
-        // Trigger Cross-fade
-        // 1. Fade IN the new layer
-        map.setPaintProperty(currentLayerId, 'raster-opacity', 0.8);
+        // Wait for tiles to load before swapping (fixes ghost frame issue)
+        const onSourceData = (e: any) => {
+          if (e.sourceId === currentSourceId && e.isSourceLoaded) {
+            map.off('sourcedata', onSourceData);
 
-        // 2. Fade OUT the old layer
-        map.setPaintProperty(oldLayerId, 'raster-opacity', 0);
+            // Now swap layers instantly (no fade to avoid ghosting)
+            map.setPaintProperty(oldLayerId, 'raster-opacity', 0);
+            map.setPaintProperty(currentLayerId, 'raster-opacity', 0.8);
+            setActiveLayerIndex(nextIndex);
+            setIsLoading(false);
+          }
+        };
 
-        // 3. Swap active index
-        setActiveLayerIndex(nextIndex);
+        // Set a timeout in case tiles don't load (fallback)
+        const timeout = setTimeout(() => {
+          map.off('sourcedata', onSourceData);
+          map.setPaintProperty(oldLayerId, 'raster-opacity', 0);
+          map.setPaintProperty(currentLayerId, 'raster-opacity', 0.8);
+          setActiveLayerIndex(nextIndex);
+          setIsLoading(false);
+        }, 3000);
+
+        map.on('sourcedata', onSourceData);
+
+        // Clear timeout if component unmounts or source changes
+        return () => {
+          clearTimeout(timeout);
+          map.off('sourcedata', onSourceData);
+        };
       }
     } catch (error) {
       console.error('Error updating layer:', error);
-    } finally {
       setIsLoading(false);
     }
   };
@@ -632,6 +788,17 @@ export default function App() {
                 </TouchableOpacity>
               ))}
             </View>
+        </View>
+
+        {/* Play Button Row */}
+        <View style={webStyles.playButtonRow}>
+          <PlayButton
+            isPlaying={isPlaying}
+            isDownloading={isDownloading}
+            progress={downloadProgress}
+            onPress={handlePlayPress}
+            size={50}
+          />
         </View>
 
         {/* Timeline Slider */}

@@ -53,6 +53,16 @@ export const webStyles = StyleSheet.create({
     elevation: 5,
     alignSelf: 'center',
   },
+  searchResultItem: {
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#eee',
+  },
+  searchResultText: {
+    color: '#333',
+    fontSize: 14,
+  },
   searchRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -204,6 +214,14 @@ export const webStyles = StyleSheet.create({
     color: 'white',
   },
 
+  // Play Button Row
+  playButtonRow: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+
   // Timeline
   timelineContainer: {
     width: '100%',
@@ -337,6 +355,14 @@ export const webStyles = StyleSheet.create({
   },
   localValueTextActive: {
     color: '#ffcc00',
+  },
+  localScrollView: {
+    flexGrow: 0,
+    marginVertical: 10,
+  },
+  localScrollContent: {
+    paddingHorizontal: 10,
+    alignItems: 'center',
   },
   loadingContainer: {
     flex: 1,

@@ -3,6 +3,7 @@ import { View, Text, TouchableOpacity, Platform, StatusBar, TextInput, Image, Sc
 import MapLibreGL from '@maplibre/maplibre-react-native';
 import Svg, { Circle, Path, Polygon, Line } from 'react-native-svg';
 import RainbowSlider from './components/RainbowSlider';
+import PlayButton from './components/PlayButton';
 import * as SplashScreen from 'expo-splash-screen';
 import * as Location from 'expo-location';
 import * as Font from 'expo-font';
@@ -63,6 +64,13 @@ export default function App() {
   const [activeLayerIndex, setActiveLayerIndex] = useState(0);
   const [bufferUrls, setBufferUrls] = useState<[string | null, string | null]>([null, null]);
   const lastProcessedUrl = useRef<string | null>(null);
+
+  // Playback state
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState(0);
+  const playInterval = useRef<NodeJS.Timeout | null>(null);
+  const cachedTileUrls = useRef<Map<string, string>>(new Map());
 
   // Load custom font for splash screen
   useEffect(() => {
@@ -217,11 +225,101 @@ export default function App() {
 
   // Playback Logic
   useEffect(() => {
-    // Playback logic removed - manual slider control only
     return () => {
       if (playInterval.current) clearInterval(playInterval.current);
     };
   }, []);
+
+  // Prefetch tiles for all timesteps
+  const prefetchTilesForChannel = useCallback(async (channelId: string) => {
+    if (timesteps.length === 0) return;
+
+    setIsDownloading(true);
+    setDownloadProgress(0);
+
+    const totalSteps = timesteps.length;
+    let completedSteps = 0;
+
+    // Generate tile URLs for all timesteps
+    for (const step of timesteps) {
+      const tiffUrl = `${BASE_BUCKET_URL}/${step.dateFolder}/forecast_${step.filenameTime}_${channelId}.tiff`;
+      const tileUrlTemplate = `${SERVER_URL}/tiles/{z}/{x}/{y}.png?url=${encodeURIComponent(tiffUrl)}&channel=${channelId}`;
+
+      // Store in cache map
+      cachedTileUrls.current.set(step.filenameTime, tileUrlTemplate);
+
+      // Warm up the server cache by requesting metadata or a sample tile
+      // We'll request a few tiles at zoom level 4 to warm the cache
+      try {
+        const warmupPromises = [];
+        for (let x = 8; x <= 10; x++) {
+          for (let y = 5; y <= 7; y++) {
+            const tileUrl = tileUrlTemplate.replace('{z}', '4').replace('{x}', String(x)).replace('{y}', String(y));
+            warmupPromises.push(
+              fetch(tileUrl).catch(() => {}) // Ignore errors, just warm cache
+            );
+          }
+        }
+        await Promise.all(warmupPromises);
+      } catch (error) {
+        console.log('Cache warmup error:', error);
+      }
+
+      completedSteps++;
+      setDownloadProgress(completedSteps / totalSteps);
+    }
+
+    setIsDownloading(false);
+  }, [timesteps]);
+
+  // Handle play button press
+  const handlePlayPress = useCallback(async () => {
+    if (isPlaying) {
+      // Stop playback - clear cache and reset state
+      if (playInterval.current) {
+        clearInterval(playInterval.current);
+        playInterval.current = null;
+      }
+      setIsPlaying(false);
+      // Clear cache when stopping - only show current frame
+      cachedTileUrls.current.clear();
+      setDownloadProgress(0);
+      return;
+    }
+
+    // Check if we need to download
+    const cacheKey = `${selectedChannel.id}_${timesteps[0]?.filenameTime}`;
+    const hasCache = cachedTileUrls.current.has(timesteps[0]?.filenameTime);
+
+    if (!hasCache) {
+      // Download tiles first
+      await prefetchTilesForChannel(selectedChannel.id);
+    }
+
+    // Start playback
+    setIsPlaying(true);
+    let currentIndex = timesteps.findIndex(s => s.filenameTime === selectedStep?.filenameTime);
+    if (currentIndex === -1) currentIndex = 0;
+
+    playInterval.current = setInterval(() => {
+      currentIndex = (currentIndex + 1) % timesteps.length;
+      setSelectedStep(timesteps[currentIndex]);
+    }, 1000);
+
+  }, [isPlaying, selectedChannel.id, timesteps, selectedStep, prefetchTilesForChannel]);
+
+  // Stop playback when channel changes
+  useEffect(() => {
+    if (isPlaying) {
+      if (playInterval.current) {
+        clearInterval(playInterval.current);
+        playInterval.current = null;
+      }
+      setIsPlaying(false);
+      setDownloadProgress(0);
+      cachedTileUrls.current.clear();
+    }
+  }, [selectedChannel.id]);
 
   // Search Logic
   const searchLocation = async (query: string) => {
@@ -329,8 +427,6 @@ export default function App() {
       }
     }
   };
-
-  // Playback logic removed - manual slider control only
 
   // Tiling Update Logic - No longer manual coordinate fetching needed
   // Tiles are fetched automatically by MapLibre from the tile server
@@ -624,6 +720,17 @@ export default function App() {
                 </TouchableOpacity>
               ))}
             </View>
+        </View>
+
+        {/* Play Button Row */}
+        <View style={styles.playButtonRow}>
+          <PlayButton
+            isPlaying={isPlaying}
+            isDownloading={isDownloading}
+            progress={downloadProgress}
+            onPress={handlePlayPress}
+            size={50}
+          />
         </View>
 
         {/* Timeline Slider */}

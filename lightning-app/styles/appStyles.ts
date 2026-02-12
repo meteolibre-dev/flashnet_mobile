@@ -230,6 +230,14 @@ export const styles = StyleSheet.create({
     fontWeight: 'bold',
   },
 
+  // Play Button Row
+  playButtonRow: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+
   // Timeline
   timelineContainer: {
     width: '100%',
