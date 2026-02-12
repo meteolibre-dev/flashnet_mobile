@@ -1,19 +1,14 @@
 import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
-import { View, Text, TouchableOpacity, Platform, StatusBar, TextInput, Dimensions, Image, ScrollView } from 'react-native';
+import { View, Text, TouchableOpacity, Platform, StatusBar, TextInput, Image, ScrollView } from 'react-native';
 import MapLibreGL from '@maplibre/maplibre-react-native';
 import Svg, { Circle, Path, Polygon, Line } from 'react-native-svg';
 import RainbowSlider from './components/RainbowSlider';
-import * as FileSystem from 'expo-file-system/legacy';
 import * as SplashScreen from 'expo-splash-screen';
 import * as Location from 'expo-location';
 import * as Font from 'expo-font';
 import {
   scanAvailableTimesteps,
-  downloadAllFrames,
-  fetchMetadata,
-  downloadImage,
   Timestep,
-  PrefetchedData,
   CHANNELS,
   SERVER_URL,
   BASE_BUCKET_URL,
@@ -36,32 +31,6 @@ const OSM_VECTOR_STYLE = `https://api.maptiler.com/maps/basic-v2/style.json?key=
 // CartoCDN Light - free, simple map perfect for weather overlays
 const CARTOLIGHT_STYLE = 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json';
 
-// Fallback: Detailed OSM raster tiles (works without API key)
-const OSM_RASTER_STYLE = JSON.stringify({
-  version: 8,
-  sources: {
-    osm: {
-      type: 'raster',
-      tiles: [
-        'https://a.tile.openstreetmap.org/{z}/{x}/{y}.png',
-        'https://b.tile.openstreetmap.org/{z}/{x}/{y}.png',
-        'https://c.tile.openstreetmap.org/{z}/{x}/{y}.png'
-      ],
-      tileSize: 256,
-      attribution: '© OpenStreetMap contributors'
-    }
-  },
-  layers: [
-    {
-      id: 'osm',
-      type: 'raster',
-      source: 'osm',
-      minzoom: 0,
-      maxzoom: 19
-    }
-  ]
-});
-
 // --- Icons ---
 const MapIcon = ({ active }: { active: boolean }) => (
   <Svg width="24" height="24" viewBox="0 0 24 24" fill="none">
@@ -82,8 +51,6 @@ export default function App() {
   const [timesteps, setTimesteps] = useState<Timestep[]>([]);
   const [selectedStep, setSelectedStep] = useState<Timestep | null>(null);
   const [selectedChannel, setSelectedChannel] = useState(CHANNELS[0]);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const playInterval = useRef<any>(null);
   const [isScanning, setIsScanning] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<any[]>([]);
@@ -92,10 +59,10 @@ export default function App() {
   const [isAppReady, setIsAppReady] = useState(false);
   const [isLocalTime, setIsLocalTime] = useState(true);
 
-  // Preloading
-  const [isPreloading, setIsPreloading] = useState(false);
-  const [preloadProgress, setPreloadProgress] = useState(0);
-  const cancelPreloadingRef = useRef(false);
+  // Double buffering for smooth playback
+  const [activeLayerIndex, setActiveLayerIndex] = useState(0);
+  const [bufferUrls, setBufferUrls] = useState<[string | null, string | null]>([null, null]);
+  const lastProcessedUrl = useRef<string | null>(null);
 
   // Load custom font for splash screen
   useEffect(() => {
@@ -105,42 +72,6 @@ export default function App() {
       console.warn('Font loading failed:', e);
     });
   }, []);
-
-  // Layer 0 State
-  const [layerUrl, setLayerUrl] = useState<string | null>(null);
-  const [layerCoordinates, setLayerCoordinates] = useState<any>(null);
-  const [layerId, setLayerId] = useState<string>("src-0");
-
-  // Layer 1 State
-  const [nextLayerUrl, setNextLayerUrl] = useState<string | null>(null);
-  const [nextLayerCoordinates, setNextLayerCoordinates] = useState<any>(null);
-  const [nextLayerId, setNextLayerId] = useState<string>("src-1");
-
-  const [activeLayerIndex, setActiveLayerIndex] = useState(0);
-  const [prevActiveLayerIndex, setPrevActiveLayerIndex] = useState<0 | 1 | null>(null);
-  const isUpdatingLayer = useRef(false);
-  const activeLayerIndexRef = useRef(0);
-  const latestParamsRef = useRef({ step: selectedStep, channel: selectedChannel });
-  const lastProcessedRef = useRef<string | null>(null);
-
-  // Use ref for prefetchedData to ensure access to latest state inside async loops
-  const prefetchedDataRef = useRef<Record<string, PrefetchedData>>({});
-
-  useEffect(() => {
-    activeLayerIndexRef.current = activeLayerIndex;
-  }, [activeLayerIndex]);
-
-  useEffect(() => {
-    latestParamsRef.current = { step: selectedStep, channel: selectedChannel };
-  }, [selectedStep, selectedChannel]);
-
-  // Pre-fetch cache
-  const [prefetchedData, setPrefetchedData] = useState<Record<string, PrefetchedData>>({});
-
-  // Sync ref with state
-  useEffect(() => {
-    prefetchedDataRef.current = prefetchedData;
-  }, [prefetchedData]);
 
   const cameraRef = useRef<any>(null);
   const [userLocation, setUserLocation] = useState<[number, number] | null>(null);
@@ -277,58 +208,20 @@ export default function App() {
     initTimesteps();
   }, []);
 
+  // Refresh point forecast when channel changes
+  useEffect(() => {
+    if (userLocation && (showPointForecast || currentTab === 'local')) {
+      fetchPointForecast(userLocation[1], userLocation[0], selectedChannel.id);
+    }
+  }, [selectedChannel.id, userLocation, showPointForecast, currentTab]);
+
   // Playback Logic
   useEffect(() => {
-    if (isPlaying && timesteps.length > 0) {
-      playInterval.current = setInterval(() => {
-        setSelectedStep((prevStep) => {
-          if (!prevStep) return timesteps[0];
-          const currentIndex = timesteps.findIndex(s => s.filenameTime === prevStep.filenameTime);
-          const nextIndex = (currentIndex + 1) % timesteps.length;
-          return timesteps[nextIndex];
-        });
-      }, 1000); // 1000ms delay per frame
-    } else {
-      if (playInterval.current) clearInterval(playInterval.current);
-    }
+    // Playback logic removed - manual slider control only
     return () => {
       if (playInterval.current) clearInterval(playInterval.current);
     };
-  }, [isPlaying, timesteps]);
-
-  // Clear hidden layer when it changes (frees MapLibre native memory)
-  useEffect(() => {
-    if (prevActiveLayerIndex !== null) {
-      // Delay cleaning the old layer to prevent blinking/empty frames while the new one loads
-      // Android native image loading is async and takes time
-      const timeout = setTimeout(() => {
-        if (prevActiveLayerIndex === 0) {
-          setLayerUrl(null);
-          setLayerCoordinates(null);
-        } else {
-          setNextLayerUrl(null);
-          setNextLayerCoordinates(null);
-        }
-        setPrevActiveLayerIndex(null);
-      }, 3000); // Wait 3s before clearing old layer (longer than interval to prevent blanks)
-
-      return () => clearTimeout(timeout);
-    }
-  }, [prevActiveLayerIndex]);
-
-  // Clear buffer layers when playback stops to free memory
-  useEffect(() => {
-    if (!isPlaying) {
-      // Keep only the current active layer, clear the buffer
-      if (activeLayerIndex === 1) {
-        setLayerUrl(null);
-        setLayerCoordinates(null);
-      } else {
-        setNextLayerUrl(null);
-        setNextLayerCoordinates(null);
-      }
-    }
-  }, [isPlaying, activeLayerIndex]);
+  }, []);
 
   // Search Logic
   const searchLocation = async (query: string) => {
@@ -437,129 +330,35 @@ export default function App() {
     }
   };
 
-  // Start preload/download sequence
-  const startDownloadSequence = async (steps: Timestep[], channelId: string) => {
-    setIsPreloading(true);
-    setPreloadProgress(0);
-    cancelPreloadingRef.current = false;
+  // Playback logic removed - manual slider control only
 
-    try {
-      await downloadAllFrames(
-        steps,
-        channelId,
-        prefetchedDataRef.current,
-        (progress) => setPreloadProgress(progress),
-        () => cancelPreloadingRef.current,
-        Platform.OS === 'web'
-      );
+  // Tiling Update Logic - No longer manual coordinate fetching needed
+  // Tiles are fetched automatically by MapLibre from the tile server
+  const tileUrl = useMemo(() => {
+    if (!selectedStep) return null;
+    const url = `${SERVER_URL}/tiles/{z}/{x}/{y}.png?url=${encodeURIComponent(
+      `${BASE_BUCKET_URL}/${selectedStep.dateFolder}/forecast_${selectedStep.filenameTime}_${selectedChannel.id}.tiff`
+    )}&channel=${selectedChannel.id}`;
 
-      // Sync state with ref
-      setPrefetchedData({ ...prefetchedDataRef.current });
-
-    } catch (error) {
-       console.error('Preload sequence error:', error);
-    } finally {
-      setIsPreloading(false);
-      if (!cancelPreloadingRef.current) {
-        setIsPlaying(true);
-      }
-    }
-  };
-
-  const handlePlayClick = () => {
-    if (isPreloading) {
-      cancelPreloadingRef.current = true;
-      setIsPreloading(false);
-    } else if (isPlaying) {
-      setIsPlaying(false);
-      cancelPreloadingRef.current = true;
-    } else {
-      startDownloadSequence(timesteps, selectedChannel.id);
-    }
-  };
-
-  // Update Layer Logic
-  useEffect(() => {
-    const processQueue = async () => {
-        if (isUpdatingLayer.current) return;
-        isUpdatingLayer.current = true;
-        setIsLoading(true);
-
-        try {
-            while (true) {
-                const { step, channel } = latestParamsRef.current;
-                if (!step) break;
-
-                const targetKey = `${step.filenameTime}_${channel.id}`;
-                if (lastProcessedRef.current === targetKey) break;
-
-                try {
-                    const cacheKey = `${step.filenameTime}_${channel.id}`;
-                    let metaData;
-                    let imageUrl;
-
-                    const cached = prefetchedDataRef.current[cacheKey];
-
-                    if (cached) {
-                        metaData = cached;
-                        imageUrl = cached.localUri || cached.url;
-                    } else {
-                        const tiffUrl = `${BASE_BUCKET_URL}/${step.dateFolder}/forecast_${step.filenameTime}_${channel.id}.tiff`;
-
-                        // 1. Get Metadata
-                        const data = await fetchMetadata(tiffUrl);
-                        if (!data) throw new Error('Failed to fetch metadata');
-                        metaData = { coordinates: data.coordinates };
-
-                        // 2. Download Image
-                        const remoteImageUrl = `${SERVER_URL}/image?url=${encodeURIComponent(tiffUrl)}&channel=${channel.id}`;
-
-                        if (Platform.OS === 'web') {
-                            imageUrl = remoteImageUrl;
-                        } else {
-                            const localUri = `${FileSystem.cacheDirectory}forecasts/${step.filenameTime}_${channel.id}.png`;
-                            const downloaded = await downloadImage(remoteImageUrl, localUri);
-                            if (!downloaded) throw new Error('Download failed');
-                            imageUrl = downloaded;
-                        }
-
-                        // Save to cache
-                        const newData = { url: remoteImageUrl, coordinates: metaData.coordinates, localUri: imageUrl };
-                        prefetchedDataRef.current = { ...prefetchedDataRef.current, [cacheKey]: newData };
-                        setPrefetchedData(prev => ({ ...prev, [cacheKey]: newData }));
-                    }
-
-                    // Double Buffering Logic
-                    const currentActiveIndex = activeLayerIndexRef.current;
-                    if (currentActiveIndex === 0) {
-                        setNextLayerUrl(imageUrl);
-                        setNextLayerCoordinates(metaData.coordinates);
-                        setPrevActiveLayerIndex(0);
-                        setActiveLayerIndex(1);
-                        activeLayerIndexRef.current = 1;
-                    } else {
-                        setLayerUrl(imageUrl);
-                        setLayerCoordinates(metaData.coordinates);
-                        setPrevActiveLayerIndex(1);
-                        setActiveLayerIndex(0);
-                        activeLayerIndexRef.current = 0;
-                    }
-
-                    lastProcessedRef.current = targetKey;
-
-                } catch (error) {
-                    console.error('Error updating layer:', error);
-                    lastProcessedRef.current = targetKey;
-                }
-            }
-        } finally {
-            setIsLoading(false);
-            isUpdatingLayer.current = false;
-        }
-    };
-
-    processQueue();
+    console.log('[TileDebug] Generated Tile URL Template:', url);
+    return url;
   }, [selectedStep, selectedChannel]);
+
+  // Update buffers for native double-buffering
+  useEffect(() => {
+    if (tileUrl && tileUrl !== lastProcessedUrl.current) {
+      lastProcessedUrl.current = tileUrl;
+      setActiveLayerIndex(current => {
+        const nextIndex = current === 0 ? 1 : 0;
+        setBufferUrls(prev => {
+          const next = [...prev] as [string | null, string | null];
+          next[nextIndex] = tileUrl;
+          return next;
+        });
+        return nextIndex;
+      });
+    }
+  }, [tileUrl]);
 
   return (
     <View style={styles.page}>
@@ -634,7 +433,7 @@ export default function App() {
       {showPointForecast && pointForecastData && currentTab === 'map' && (
         <View style={styles.pointForecastPanel}>
           <View style={styles.pointForecastHeader}>
-            <Text style={styles.pointForecastTitle}>Lightning Forecast</Text>
+            <Text style={styles.pointForecastTitle}>{selectedChannel.label} Forecast</Text>
             <Text style={styles.pointForecastSubtitle}>
               {pointForecastData.coordinates.lat.toFixed(4)}°N, {pointForecastData.coordinates.lon.toFixed(4)}°E
             </Text>
@@ -718,42 +517,34 @@ export default function App() {
               style={{
                 lineColor: '#ffffff',
                 lineWidth: 2,
-                lineDasharray: [2, 2],
                 lineOpacity: 0.6,
               }}
             />
           </MapLibreGL.ShapeSource>
 
-          {/* Overlay Layers - Dynamic Order */}
-          {activeLayerIndex === 1 ? (
-            <>
-               {/* Render 0 (Bottom) then 1 (Top) */}
-               {layerUrl && layerCoordinates && (
-                 <MapLibreGL.ImageSource id={layerId} coordinates={layerCoordinates} url={layerUrl}>
-                   <MapLibreGL.RasterLayer id={`layer-${layerId}`} style={{ rasterOpacity: 0.8, rasterFadeDuration: 0 }} />
-                 </MapLibreGL.ImageSource>
-               )}
-               {nextLayerUrl && nextLayerCoordinates && (
-                 <MapLibreGL.ImageSource id={nextLayerId} coordinates={nextLayerCoordinates} url={nextLayerUrl}>
-                   <MapLibreGL.RasterLayer id={`layer-${nextLayerId}`} style={{ rasterOpacity: 0.8, rasterFadeDuration: 0 }} />
-                 </MapLibreGL.ImageSource>
-               )}
-            </>
-          ) : (
-            <>
-               {/* Render 1 (Bottom) then 0 (Top) */}
-               {nextLayerUrl && nextLayerCoordinates && (
-                 <MapLibreGL.ImageSource id={nextLayerId} coordinates={nextLayerCoordinates} url={nextLayerUrl}>
-                   <MapLibreGL.RasterLayer id={`layer-${nextLayerId}`} style={{ rasterOpacity: 0.8, rasterFadeDuration: 0 }} />
-                 </MapLibreGL.ImageSource>
-               )}
-               {layerUrl && layerCoordinates && (
-                 <MapLibreGL.ImageSource id={layerId} coordinates={layerCoordinates} url={layerUrl}>
-                   <MapLibreGL.RasterLayer id={`layer-${layerId}`} style={{ rasterOpacity: 0.8, rasterFadeDuration: 0 }} />
-                 </MapLibreGL.ImageSource>
-               )}
-            </>
-          )}
+          {/* Overlay Layers - Double Buffering for Smooth Playback */}
+          {[0, 1].map((idx) => {
+            const isActive = activeLayerIndex === idx;
+            const url = bufferUrls[idx];
+            if (!url) return null;
+
+            return (
+              <MapLibreGL.RasterSource
+                key={`forecast-source-${idx}-${selectedChannel.id}`}
+                id={`forecast-source-${idx}`}
+                tileUrlTemplates={[url]}
+                tileSize={256}
+              >
+                <MapLibreGL.RasterLayer
+                  id={`forecast-layer-${idx}`}
+                  style={{
+                    rasterOpacity: isActive ? 0.8 : 0,
+                    rasterFadeDuration: 500,
+                  }}
+                />
+              </MapLibreGL.RasterSource>
+            );
+          })}
         </MapLibreGL.MapView>
       )}
 
@@ -761,7 +552,7 @@ export default function App() {
       {currentTab === 'local' && (
         <View style={styles.localView}>
           <View style={styles.localHeader}>
-            <Text style={styles.localTitle}>Local Forecast</Text>
+            <Text style={styles.localTitle}>{selectedChannel.label} Local Forecast</Text>
             <Text style={styles.localSubtitle}>
               {userLocation ? `${userLocation[1].toFixed(4)}°N, ${userLocation[0].toFixed(4)}°E` : 'Location not set'}
             </Text>
@@ -820,42 +611,6 @@ export default function App() {
       {currentTab === 'map' && (
       <View style={styles.controlsContainer}>
         <View style={styles.controlsRow}>
-            <View style={{ width: 60, height: 60, justifyContent: 'center', alignItems: 'center', marginRight: 10 }}>
-              {isPreloading && (
-                <Svg height="60" width="60" style={{ position: 'absolute', transform: [{ rotate: '-90deg' }] }}>
-                  <Circle
-                    cx="30"
-                    cy="30"
-                    r="28"
-                    stroke="rgba(255,255,255,0.2)"
-                    strokeWidth="3"
-                    fill="none"
-                  />
-                  <Circle
-                    cx="30"
-                    cy="30"
-                    r="28"
-                    stroke="#2dd4bf"
-                    strokeWidth="3"
-                    fill="none"
-                    strokeDasharray={`${2 * Math.PI * 28}`}
-                    strokeDashoffset={`${2 * Math.PI * 28 * (1 - preloadProgress)}`}
-                    strokeLinecap="round"
-                  />
-                </Svg>
-              )}
-              <TouchableOpacity
-                onPress={handlePlayClick}
-                style={[styles.playBtn, isPlaying && styles.pauseBtn, { marginRight: 0 }]}
-              >
-                {isPreloading ? (
-                   <Text style={[styles.playBtnText, { fontSize: 11, fontWeight: 'bold' }]}>{Math.round(preloadProgress * 100)}%</Text>
-                ) : (
-                   <Text style={styles.playBtnText}>{isPlaying ? "II" : "▶"}</Text>
-                )}
-              </TouchableOpacity>
-            </View>
-
              <View style={styles.channelRow}>
               {CHANNELS.map((ch) => (
                 <TouchableOpacity
@@ -910,8 +665,6 @@ export default function App() {
         <TouchableOpacity
           style={[styles.tabItem, currentTab === 'local' && styles.tabItemActive]}
           onPress={() => {
-            setIsPlaying(false);
-            cancelPreloadingRef.current = true;
             setCurrentTab('local');
             if (!userLocation) {
               handleLocationPress();

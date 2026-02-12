@@ -109,12 +109,13 @@ export default function App() {
   const [timesteps, setTimesteps] = useState<Timestep[]>([]);
   const [selectedStep, setSelectedStep] = useState<Timestep | null>(null);
   const [selectedChannel, setSelectedChannel] = useState(CHANNELS[0]);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const playInterval = useRef<any>(null);
   const mapRef = useRef<any>(null);
   const mapInstance = useRef<any>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isScanning, setIsScanning] = useState(true);
+
+  // Double buffering for smooth playback
+  const [activeLayerIndex, setActiveLayerIndex] = useState(0);
 
   // Pre-fetch cache
   const [prefetchedData, setPrefetchedData] = useState<Record<string, PrefetchedData>>({});
@@ -171,36 +172,13 @@ export default function App() {
     return (currentIndex / (timesteps.length - 1)) * 100;
   }, [currentIndex, timesteps.length]);
 
-  // Pre-fetch function for better preloading
+  // Pre-fetch function - Simplified for tiles, just to warm up the cache on server or load metadata
   const prefetchTimestep = useCallback(async (step: Timestep) => {
     if (!step) return;
-    const cacheKey = `${step.filenameTime}_${selectedChannel.id}`;
-    if (prefetchedData[cacheKey]) return;
-
-    try {
-      const tiffUrl = `${BASE_BUCKET_URL}/${step.dateFolder}/forecast_${step.filenameTime}_${selectedChannel.id}.tiff`;
-      const metaUrl = `${SERVER_URL}/metadata?url=${encodeURIComponent(tiffUrl)}`;
-
-      // Fetch metadata
-      const metaRes = await fetch(metaUrl);
-      if (!metaRes.ok) return;
-      const metaData = await metaRes.json();
-
-      const imageUrl = `${SERVER_URL}/image?url=${encodeURIComponent(tiffUrl)}&channel=${selectedChannel.id}`;
-
-      // Store in prefetch cache
-      setPrefetchedData(prev => ({
-        ...prev,
-        [cacheKey]: { url: imageUrl, coordinates: metaData.coordinates }
-      }));
-
-      // Pre-load image into browser cache
-      const img = new (window as any).Image();
-      img.src = imageUrl;
-    } catch (e) {
-      console.warn('Pre-fetch failed', e);
-    }
-  }, [selectedChannel.id, prefetchedData]);
+    // For tiles, we don't need to pre-fetch the full image.
+    // The browser will handle tile caching.
+    // We optionally could "warm up" the server cache by hitting the /metadata endpoint maybe?
+  }, [selectedChannel.id]);
 
   // Splash Screen Logic
   const slideAnim = useRef(new Animated.Value(0)).current;
@@ -243,6 +221,26 @@ export default function App() {
         map.addControl(new NavigationControl());
 
         map.on('load', () => {
+          // Initialize double buffering sources and layers
+          [0, 1].forEach(idx => {
+            map.addSource(`forecast-source-${idx}`, {
+              type: 'raster',
+              tiles: [''], // Will be updated on first selection
+              tileSize: 256,
+              attribution: 'FlashNet'
+            });
+
+            map.addLayer({
+              id: `forecast-layer-${idx}`,
+              type: 'raster',
+              source: `forecast-source-${idx}`,
+              paint: {
+                'raster-opacity': 0,
+                'raster-fade-duration': 500
+              }
+            });
+          });
+
           updateMapLayer();
 
           // Get user location and center map
@@ -303,24 +301,7 @@ export default function App() {
     initTimesteps();
   }, []);
 
-  // Playback Logic
-  useEffect(() => {
-    if (isPlaying && timesteps.length > 0) {
-      playInterval.current = setInterval(() => {
-        setSelectedStep((prevStep) => {
-          if (!prevStep) return timesteps[0];
-          const currentIndex = timesteps.findIndex(s => s.filenameTime === prevStep.filenameTime);
-          const nextIndex = (currentIndex + 1) % timesteps.length;
-          return timesteps[nextIndex];
-        });
-      }, 1000); // 1 second per frame
-    } else {
-      if (playInterval.current) clearInterval(playInterval.current);
-    }
-    return () => {
-      if (playInterval.current) clearInterval(playInterval.current);
-    };
-  }, [isPlaying, timesteps]);
+  // Playback Logic removed - manual slider control only
 
   const searchLocation = async (query: string) => {
     if (!query.trim()) {
@@ -416,6 +397,15 @@ export default function App() {
     }
   };
 
+  // Refresh point forecast when channel changes
+  useEffect(() => {
+    if (userLocation && (showPointForecast || currentTab === 'local')) {
+      fetchPointForecast(userLocation[1], userLocation[0], selectedChannel.id);
+    }
+  }, [selectedChannel.id, userLocation, showPointForecast, currentTab]);
+
+  // Playback functionality removed - manual slider control only
+
   // Pre-fetch next logic - enhanced for smoother playback
   useEffect(() => {
     if (!selectedStep || timesteps.length === 0) return;
@@ -449,58 +439,39 @@ export default function App() {
     if (mapInstance.current && mapInstance.current.isStyleLoaded() && selectedStep) {
       updateMapLayer();
     }
-  }, [selectedStep, selectedChannel]);
+  }, [selectedStep, selectedChannel, activeLayerIndex]); // Added activeLayerIndex to prevent stale closure
 
   const updateMapLayer = async () => {
     if (!mapInstance.current || !selectedStep) return;
     const map = mapInstance.current;
-    
-    // Clean up previous layers/sources
-    if (map.getLayer('forecast-layer')) map.removeLayer('forecast-layer');
-    if (map.getSource('forecast-source')) map.removeSource('forecast-source');
+    if (!map.isStyleLoaded()) return;
+
+    // Determine which layer to update (the one that is currently hidden)
+    const nextIndex = activeLayerIndex === 0 ? 1 : 0;
+    const currentLayerId = `forecast-layer-${nextIndex}`;
+    const currentSourceId = `forecast-source-${nextIndex}`;
+    const oldLayerId = `forecast-layer-${activeLayerIndex}`;
 
     setIsLoading(true);
     try {
-      const cacheKey = `${selectedStep.filenameTime}_${selectedChannel.id}`;
-      let metaData;
-      let imageUrl;
+      const tiffUrl = `${BASE_BUCKET_URL}/${selectedStep.dateFolder}/forecast_${selectedStep.filenameTime}_${selectedChannel.id}.tiff`;
+      const tileUrlTemplate = `${SERVER_URL}/tiles/{z}/{x}/{y}.png?url=${encodeURIComponent(tiffUrl)}&channel=${selectedChannel.id}`;
 
-      if (prefetchedData[cacheKey]) {
-        metaData = prefetchedData[cacheKey];
-        imageUrl = metaData.url;
-      } else {
-        const tiffUrl = `${BASE_BUCKET_URL}/${selectedStep.dateFolder}/forecast_${selectedStep.filenameTime}_${selectedChannel.id}.tiff`;
+      // Update source tiles
+      const source: any = map.getSource(currentSourceId);
+      if (source) {
+        source.setTiles([tileUrlTemplate]);
 
-        // 1. Get Metadata (Coordinates)
-        const metaUrl = `${SERVER_URL}/metadata?url=${encodeURIComponent(tiffUrl)}`;
-        const metaRes = await fetch(metaUrl);
-        if (!metaRes.ok) throw new Error('Failed to fetch metadata');
-        const data = await metaRes.json();
-        metaData = { coordinates: data.coordinates };
+        // Trigger Cross-fade
+        // 1. Fade IN the new layer
+        map.setPaintProperty(currentLayerId, 'raster-opacity', 0.8);
 
-        // 2. Set Image URL (Full Image)
-        imageUrl = `${SERVER_URL}/image?url=${encodeURIComponent(tiffUrl)}&channel=${selectedChannel.id}`;
+        // 2. Fade OUT the old layer
+        map.setPaintProperty(oldLayerId, 'raster-opacity', 0);
+
+        // 3. Swap active index
+        setActiveLayerIndex(nextIndex);
       }
-
-      console.log('Using Image URL:', imageUrl);
-      console.log('Coordinates:', metaData.coordinates);
-
-      map.addSource('forecast-source', {
-        type: 'image',
-        url: imageUrl,
-        coordinates: metaData.coordinates
-      });
-
-      map.addLayer({
-        id: 'forecast-layer',
-        type: 'raster',
-        source: 'forecast-source',
-        paint: {
-          'raster-opacity': selectedChannel.id.startsWith('sat_') ? 0.8 : 0.8,
-          'raster-fade-duration': 0
-        }
-      });
-
     } catch (error) {
       console.error('Error updating layer:', error);
     } finally {
@@ -562,7 +533,7 @@ export default function App() {
       {showPointForecast && pointForecastData && currentTab === 'map' && (
         <View style={webStyles.pointForecastPanel}>
           <View style={webStyles.pointForecastHeader}>
-            <Text style={webStyles.pointForecastTitle}>Lightning Forecast</Text>
+            <Text style={webStyles.pointForecastTitle}>{selectedChannel.label} Forecast</Text>
             <Text style={webStyles.pointForecastSubtitle}>
               {pointForecastData.coordinates.lat.toFixed(4)}°N, {pointForecastData.coordinates.lon.toFixed(4)}°E
             </Text>
@@ -603,7 +574,7 @@ export default function App() {
       {currentTab === 'local' && (
         <View style={webStyles.localView}>
           <View style={webStyles.localHeader}>
-            <Text style={webStyles.localTitle}>Local Forecast</Text>
+            <Text style={webStyles.localTitle}>{selectedChannel.label} Local Forecast</Text>
             <Text style={webStyles.localSubtitle}>
               {userLocation ? `${userLocation[1].toFixed(4)}°N, ${userLocation[0].toFixed(4)}°E` : 'Location not set'}
             </Text>
@@ -648,13 +619,6 @@ export default function App() {
       <View style={webStyles.controlsContainer}>
         {/* Channel Selector */}
         <View style={webStyles.controlsRow}>
-            <TouchableOpacity 
-              onPress={() => setIsPlaying(!isPlaying)}
-              style={[webStyles.playBtn, isPlaying && webStyles.pauseBtn]}
-            >
-              <Text style={webStyles.playBtnText}>{isPlaying ? "⏸" : "▶"}</Text>
-            </TouchableOpacity>
-
             <View style={webStyles.channelRow}>
               {CHANNELS.map((ch) => (
                 <TouchableOpacity

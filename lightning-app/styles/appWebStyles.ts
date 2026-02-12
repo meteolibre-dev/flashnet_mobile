@@ -179,24 +179,6 @@ export const webStyles = StyleSheet.create({
     width: '100%',
     justifyContent: 'center',
   },
-  playBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: '#007AFF',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 10,
-    elevation: 4,
-  },
-  pauseBtn: {
-    backgroundColor: '#FF3B30',
-  },
-  playBtnText: {
-    color: 'white',
-    fontSize: 18,
-    fontWeight: 'bold',
-  },
   channelRow: {
     flexDirection: 'row',
     backgroundColor: 'rgba(255,255,255,0.9)',

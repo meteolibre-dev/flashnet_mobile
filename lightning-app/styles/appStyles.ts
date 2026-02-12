@@ -207,23 +207,6 @@ export const styles = StyleSheet.create({
     borderColor: '#333',
     marginBottom: 10,
   },
-  playBtn: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: '#007AFF',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginRight: 10,
-  },
-  pauseBtn: {
-    backgroundColor: '#FF3B30',
-  },
-  playBtnText: {
-    color: 'white',
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
   channelRow: {
     flexDirection: 'row',
     backgroundColor: 'rgba(255,255,255,0.1)',
