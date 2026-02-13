@@ -432,10 +432,19 @@ app.get('/tiles/:z/:x/:y.png', async (req, res) => {
     // Generate local filename from URL
     const filename = path.basename(new URL(fileUrl).pathname);
     const localPath = path.join(CACHE_DIR, filename);
-    const tileCachePath = path.join(CACHE_DIR, `${filename}_${channelId}_tile_${z}_${x}_${y}.png`);
+
+    // Check new pre-cached tile location first
+    const filenameNoExt = filename.replace('.tiff', '');
+    const tileDir = path.join(CACHE_DIR, 'tiles', `${filenameNoExt}_${channelId}`);
+    const tileCachePath = path.join(tileDir, `${z}_${x}_${y}.png`);
 
     try {
-        // 0. Check tile cache first
+        // Ensure tile directory exists
+        if (!fs.existsSync(tileDir)) {
+            fs.mkdirSync(tileDir, { recursive: true });
+        }
+
+        // 0. Check pre-cached tile first
         if (fs.existsSync(tileCachePath)) {
             // Check if source TIFF is newer than cached tile
             if (fs.existsSync(localPath)) {
@@ -444,6 +453,20 @@ app.get('/tiles/:z/:x/:y.png', async (req, res) => {
                 if (tiffStat.mtime <= tileStat.mtime) {
                     res.type('image/png');
                     res.sendFile(tileCachePath);
+                    return;
+                }
+            }
+        }
+
+        // Fallback to old cache location (for backward compatibility)
+        const oldTileCachePath = path.join(CACHE_DIR, `${filename}_${channelId}_tile_${z}_${x}_${y}.png`);
+        if (fs.existsSync(oldTileCachePath)) {
+            if (fs.existsSync(localPath)) {
+                const tileStat = fs.statSync(oldTileCachePath);
+                const tiffStat = fs.statSync(localPath);
+                if (tiffStat.mtime <= tileStat.mtime) {
+                    res.type('image/png');
+                    res.sendFile(oldTileCachePath);
                     return;
                 }
             }
@@ -605,6 +628,202 @@ app.get('/admin/clear-cache', (req, res) => {
 const BUCKET_BASE_URL = "https://storage.googleapis.com/inference_result/forecasts";
 
 // Pre-cache the last 18 timesteps for all channels at startup
+// Tile pre-caching configuration
+const TILE_CACHE_MIN_ZOOM = 4;
+const TILE_CACHE_MAX_ZOOM = 7;
+
+// Convert lat/lon to tile coordinates
+function latLonToTile(lat, lon, zoom) {
+    const latRad = lat * Math.PI / 180;
+    const n = Math.pow(2, zoom);
+    const x = Math.floor((lon + 180) / 360 * n);
+    const y = Math.floor((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * n);
+    return [x, y];
+}
+
+// Pre-cache all tiles for a given TIFF file
+async function preCacheTilesForFile(tiffPath, channelId) {
+    const filename = path.basename(tiffPath, '.tiff');
+    const tileCacheDir = path.join(CACHE_DIR, 'tiles', `${filename}_${channelId}`);
+
+    try {
+        const tiff = await GeoTIFF.fromFile(tiffPath);
+        const image = await tiff.getImage();
+        const bbox = image.getBoundingBox(); // [minX, minY, maxX, maxY] in LatLon
+        const minLon = bbox[0];
+        const minLat = bbox[1];
+        const maxLon = bbox[2];
+        const maxLat = bbox[3];
+
+        let tilesGenerated = 0;
+
+        for (let z = TILE_CACHE_MIN_ZOOM; z <= TILE_CACHE_MAX_ZOOM; z++) {
+            // Get tile range for this bbox
+            const [minX, minY] = latLonToTile(minLat, minLon, z);
+            const [maxX, maxY] = latLonToTile(maxLat, maxLon, z);
+
+            for (let x = minX; x <= maxX; x++) {
+                for (let y = minY; y <= maxY; y++) {
+                    const tileCachePath = path.join(tileCacheDir, `${z}_${x}_${y}.png`);
+
+                    // Skip if already cached
+                    if (fs.existsSync(tileCachePath)) {
+                        continue;
+                    }
+
+                    // Ensure directory exists
+                    if (!fs.existsSync(tileCacheDir)) {
+                        fs.mkdirSync(tileCacheDir, { recursive: true });
+                    }
+
+                    try {
+                        // Generate tile using the same logic as the endpoint
+                        const tileBuffer = await generateTile(tiffPath, channelId, z, x, y);
+                        if (tileBuffer) {
+                            fs.writeFileSync(tileCachePath, tileBuffer);
+                            tilesGenerated++;
+                        }
+                    } catch (err) {
+                        // Skip tiles that fail to generate (outside bounds, etc.)
+                    }
+                }
+            }
+        }
+
+        if (tilesGenerated > 0) {
+            console.log(`  Generated ${tilesGenerated} tiles for ${filename}_${channelId}`);
+        }
+
+        return tilesGenerated;
+    } catch (error) {
+        console.error(`  Error pre-caching tiles for ${filename}:`, error.message);
+        return 0;
+    }
+}
+
+// Generate a single tile (extracted logic from endpoint)
+async function generateTile(tiffPath, channelId, z, x, y) {
+    const tiff = await GeoTIFF.fromFile(tiffPath);
+    const image = await tiff.getImage();
+
+    const width = image.getWidth();
+    const height = image.getHeight();
+    const bbox = image.getBoundingBox();
+    const tiffMinLon = bbox[0];
+    const tiffMinLat = bbox[1];
+    const tiffMaxLon = bbox[2];
+    const tiffMaxLat = bbox[3];
+    const tiffWidthLon = tiffMaxLon - tiffMinLon;
+    const tiffHeightLat = tiffMaxLat - tiffMinLat;
+
+    // NoData handling
+    const fileDirectory = image.getFileDirectory();
+    let noDataValue = null;
+    if (fileDirectory.GDAL_NODATA) {
+        const cleanStr = String(fileDirectory.GDAL_NODATA).replace(/\0/g, '').trim();
+        noDataValue = cleanStr.toLowerCase() === 'nan' ? NaN : parseFloat(cleanStr);
+    }
+
+    const [tileMinX, tileMinY, tileMaxX, tileMaxY] = tileBounds(z, x, y);
+
+    const TILE_SIZE = 256;
+    const outBuffer = Buffer.alloc(TILE_SIZE * TILE_SIZE * 4);
+
+    const [minLon, minLat] = unproject(tileMinX, tileMinY);
+    const [maxLon, maxLat] = unproject(tileMaxX, tileMaxY);
+
+    const getTiffPixel = (lat, lon) => {
+        const px = ((lon - tiffMinLon) / tiffWidthLon) * width;
+        const py = ((tiffMaxLat - lat) / tiffHeightLat) * height;
+        return [px, py];
+    };
+
+    const [p1x, p1y] = getTiffPixel(minLat, minLon);
+    const [p2x, p2y] = getTiffPixel(maxLat, maxLon);
+    const [p3x, p3y] = getTiffPixel(maxLat, minLon);
+    const [p4x, p4y] = getTiffPixel(minLat, maxLon);
+
+    const winMinX = Math.floor(Math.min(p1x, p2x, p3x, p4x));
+    const winMaxX = Math.ceil(Math.max(p1x, p2x, p3x, p4x));
+    const winMinY = Math.floor(Math.min(p1y, p2y, p3y, p4y));
+    const winMaxY = Math.ceil(Math.max(p1y, p2y, p3y, p4y));
+
+    const readX = Math.max(0, winMinX);
+    const readY = Math.max(0, winMinY);
+    const readW = Math.min(width, winMaxX) - readX;
+    const readH = Math.min(height, winMaxY) - readY;
+
+    if (readW <= 0 || readH <= 0) {
+        return null; // Tile is outside TIFF
+    }
+
+    const rasters = await image.readRasters({
+        window: [readX, readY, readX + readW, readY + readH],
+        width: readW,
+        height: readH
+    });
+    const data = rasters[0];
+
+    for (let ty = 0; ty < TILE_SIZE; ty++) {
+        const worldY = tileMaxY - (ty / TILE_SIZE) * (tileMaxY - tileMinY);
+
+        for (let tx = 0; tx < TILE_SIZE; tx++) {
+            const worldX = tileMinX + (tx / TILE_SIZE) * (tileMaxX - tileMinX);
+
+            const [lon, lat] = unproject(worldX, worldY);
+            const [absPx, absPy] = getTiffPixel(lat, lon);
+
+            const localPx = Math.floor(absPx - readX);
+            const localPy = Math.floor(absPy - readY);
+
+            let val = NaN;
+            if (localPx >= 0 && localPx < readW && localPy >= 0 && localPy < readH) {
+                val = data[localPy * readW + localPx];
+            }
+
+            if (noDataValue !== null && val === noDataValue) {
+                val = NaN;
+            }
+
+            const [r, g, b, a] = getColor(val, channelId);
+
+            const idx = (ty * TILE_SIZE + tx) * 4;
+            outBuffer[idx] = r;
+            outBuffer[idx + 1] = g;
+            outBuffer[idx + 2] = b;
+            outBuffer[idx + 3] = a;
+        }
+    }
+
+    return await sharp(outBuffer, { raw: { width: 256, height: 256, channels: 4 } })
+        .png()
+        .toBuffer();
+}
+
+// Check if tiles are stale (source TIFF newer than tiles)
+function areTilesStale(tiffPath, channelId) {
+    const filename = path.basename(tiffPath, '.tiff');
+    const tileCacheDir = path.join(CACHE_DIR, 'tiles', `${filename}_${channelId}`);
+
+    if (!fs.existsSync(tileCacheDir)) {
+        return true;
+    }
+
+    const tiffStat = fs.statSync(tiffPath);
+    const tiles = fs.readdirSync(tileCacheDir);
+
+    // Check if any tile is older than the TIFF
+    for (const tile of tiles) {
+        const tilePath = path.join(tileCacheDir, tile);
+        const tileStat = fs.statSync(tilePath);
+        if (tiffStat.mtime > tileStat.mtime) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 async function preCacheLatestTimesteps() {
     console.log('Pre-caching latest timesteps...');
     const now = new Date();
@@ -659,6 +878,7 @@ async function preCacheLatestTimesteps() {
     const channels = ['lightning', 'sat_ch0', 'sat_ch1'];
     let downloaded = 0;
     let upToDate = 0;
+    const newlyDownloaded = [];
 
     for (const ts of latestTimesteps) {
         for (const channel of channels) {
@@ -688,6 +908,7 @@ async function preCacheLatestTimesteps() {
                         const buffer = await response.buffer();
                         fs.writeFileSync(localPath, buffer);
                         downloaded++;
+                        newlyDownloaded.push({ path: localPath, channel });
                     }
                 } catch (error) {
                     console.error(`  Failed to download ${filename}:`, error.message);
@@ -699,14 +920,49 @@ async function preCacheLatestTimesteps() {
     }
 
     console.log(`Pre-caching complete. Downloaded ${downloaded} files, ${upToDate} already up-to-date.`);
+
+    // Pre-cache tiles for newly downloaded files
+    if (newlyDownloaded.length > 0) {
+        console.log('Pre-caching tiles for new files...');
+        let totalTilesGenerated = 0;
+
+        for (const { path: tiffPath, channel } of newlyDownloaded) {
+            const tilesGenerated = await preCacheTilesForFile(tiffPath, channel);
+            totalTilesGenerated += tilesGenerated;
+        }
+
+        console.log(`Tile pre-caching complete. Generated ${totalTilesGenerated} tiles.`);
+    } else {
+        // Check if we need to regenerate stale tiles
+        console.log('Checking for stale tiles...');
+        let staleTilesFound = 0;
+
+        for (const ts of latestTimesteps) {
+            for (const channel of channels) {
+                const filename = `forecast_${ts.filenameTime}_${channel}.tiff`;
+                const localPath = path.join(CACHE_DIR, filename);
+
+                if (fs.existsSync(localPath) && areTilesStale(localPath, channel)) {
+                    staleTilesFound++;
+                    await preCacheTilesForFile(localPath, channel);
+                }
+            }
+        }
+
+        if (staleTilesFound > 0) {
+            console.log(`Regenerated ${staleTilesFound} stale tile sets.`);
+        }
+    }
 }
 
 async function cleanImageCache() {
     console.log('Running image cache cleanup...');
     try {
         const files = fs.readdirSync(CACHE_DIR);
-        const pngFiles = files.filter(f => f.endsWith('.png'));
         let deletedCount = 0;
+
+        // Clean up old-style PNG files (non-tiles directory)
+        const pngFiles = files.filter(f => f.endsWith('.png'));
 
         for (const pngFile of pngFiles) {
             const pngPath = path.join(CACHE_DIR, pngFile);
@@ -746,8 +1002,60 @@ async function cleanImageCache() {
                 }
             }
         }
+
+        // Clean up new-style tiles directories
+        const tilesDir = path.join(CACHE_DIR, 'tiles');
+        if (fs.existsSync(tilesDir)) {
+            const tileDirs = fs.readdirSync(tilesDir);
+
+            for (const tileDir of tileDirs) {
+                const tileDirPath = path.join(tilesDir, tileDir);
+                const stat = fs.statSync(tileDirPath);
+
+                if (!stat.isDirectory()) continue;
+
+                // Extract TIFF filename from directory name (e.g., forecast_202601190110_lightning)
+                const dirNameMatch = tileDir.match(/^(forecast_\d{12}_(lightning|sat_ch0|sat_ch1))$/);
+                if (!dirNameMatch) {
+                    // Unknown directory, skip or delete
+                    continue;
+                }
+
+                const tiffFilename = dirNameMatch[1] + '.tiff';
+                const tiffPath = path.join(CACHE_DIR, tiffFilename);
+
+                if (!fs.existsSync(tiffPath)) {
+                    console.log(`  Deleting orphaned tile directory: ${tileDir} (Source TIFF missing)`);
+                    fs.rmSync(tileDirPath, { recursive: true, force: true });
+                    deletedCount++;
+                } else {
+                    // Check if any tile is stale
+                    const tiles = fs.readdirSync(tileDirPath);
+                    const tiffStat = fs.statSync(tiffPath);
+
+                    for (const tile of tiles) {
+                        if (!tile.endsWith('.png')) continue;
+                        const tilePath = path.join(tileDirPath, tile);
+                        const tileStat = fs.statSync(tilePath);
+
+                        if (tiffStat.mtime > tileStat.mtime) {
+                            console.log(`  Deleting stale tile: ${tileDir}/${tile} (Source TIFF updated)`);
+                            fs.unlinkSync(tilePath);
+                            deletedCount++;
+                        }
+                    }
+
+                    // Clean up empty tile directories
+                    const remainingTiles = fs.readdirSync(tileDirPath).filter(f => f.endsWith('.png'));
+                    if (remainingTiles.length === 0) {
+                        fs.rmSync(tileDirPath, { recursive: true, force: true });
+                    }
+                }
+            }
+        }
+
         if (deletedCount > 0) {
-            console.log(`Cleanup complete. Deleted ${deletedCount} files.`);
+            console.log(`Cleanup complete. Deleted ${deletedCount} files/directories.`);
         } else {
             console.log('Cleanup complete. No stale files found.');
         }
