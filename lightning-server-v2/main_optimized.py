@@ -288,7 +288,17 @@ async def get_tile(
         )
 
     config = BANDS[band]
-    url = get_cog_url(time, band)
+
+    try:
+        url = get_cog_url(time, band)
+    except Exception as e:
+        # Signed URL generation failed - return transparent tile
+        from io import BytesIO
+        from PIL import Image
+        img = Image.new('RGBA', (256, 256), (0, 0, 0, 0))
+        buffer = BytesIO()
+        img.save(buffer, format='PNG')
+        return Response(content=buffer.getvalue(), media_type="image/png")
 
     try:
         # Use COGReader - reads directly from GCS with HTTP range requests
@@ -409,10 +419,22 @@ async def get_bounds(
     if band not in BANDS:
         raise HTTPException(status_code=400, detail=f"Invalid band: {band}")
 
-    url = get_cog_url(time, band)
-
     # Default bounds for Europe region (matching frontend REGION)
     default_bounds = [-10.0, 33.0, 33.0, 65.0]  # [west, south, east, north]
+
+    try:
+        url = get_cog_url(time, band)
+    except Exception as e:
+        # Signed URL generation failed - return default bounds
+        return JSONResponse({
+            "url": f"gs://inference_result/forecasts/{time[:4]}-{time[4:6]}-{time[6:8]}/forecast_{time}_{band}.tiff",
+            "bounds": default_bounds,
+            "crs": "EPSG:4326",
+            "size": None,
+            "nodata": None,
+            "overviews": [],
+            "error": f"Failed to generate signed URL: {str(e)}"
+        })
 
     try:
         with rasterio.open(url) as cog:
