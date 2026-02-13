@@ -93,7 +93,9 @@ def get_cog_url(timestamp: str, band: str) -> str:
     - forecast_{timestamp}_sat_ch{0,1,...}.tiff
     - forecast_{timestamp}_lightning.tiff
     """
-    return f"{BUCKET_BASE_URL}/{timestamp[:8]}/forecast_{timestamp}_{band}.tiff"
+    # Convert YYYYMMDD to YYYY-MM-DD for bucket path
+    date_folder = f"{timestamp[:4]}-{timestamp[4:6]}-{timestamp[6:8]}"
+    return f"{BUCKET_BASE_URL}/{date_folder}/forecast_{timestamp}_{band}.tiff"
 
 
 # Custom colormap for lightning (yellow -> red)
