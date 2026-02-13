@@ -162,6 +162,7 @@ async def get_available_timesteps(
     """
     Scan the GCS bucket for available timesteps.
     Returns actual timestamps that have data in the bucket.
+    For each timestamp, also indicates which other bands are available.
     """
     # Extract bucket name from URL
     bucket_name = BUCKET_BASE_URL.replace("https://storage.googleapis.com/", "").split("/")[0]
@@ -171,27 +172,34 @@ async def get_available_timesteps(
         storage_client = storage.Client()
         bucket = storage_client.bucket(bucket_name)
 
-        found_timestamps: Set[str] = set()
+        # Track timestamps and their available bands
+        timestamp_bands: Dict[str, Set[str]] = {}
         now = datetime.utcnow()
 
-        # Scan for each day
+        # Scan for each day and each band
         for i in range(days):
             d = now - timedelta(days=i)
             date_folder = d.strftime("%Y-%m-%d")
             prefix = f"forecasts/{date_folder}/"
 
             # List blobs with this prefix
-            blobs = bucket.list_blobs(prefix=prefix, max_results=500)
+            blobs = bucket.list_blobs(prefix=prefix, max_results=1000)
 
             for blob in blobs:
-                # Pattern: forecasts/YYYY-MM-DD/forecast_YYYYMMDDHHMM_lightning.tiff
-                match = re.search(r"forecast_(\d{12})_" + re.escape(band) + r"\.tiff$", blob.name)
+                # Extract timestamp and band from filename
+                # Pattern: forecasts/YYYY-MM-DD/forecast_YYYYMMDDHHMM_band.tiff
+                match = re.search(r"forecast_(\d{12})_([^.]+)\.tiff$", blob.name)
                 if match:
-                    found_timestamps.add(match.group(1))
+                    ts = match.group(1)
+                    found_band = match.group(2)
+
+                    if ts not in timestamp_bands:
+                        timestamp_bands[ts] = set()
+                    timestamp_bands[ts].add(found_band)
 
         # Convert to sorted list with datetime info
         timestamps = []
-        for ts in sorted(found_timestamps):
+        for ts, bands in sorted(timestamp_bands.items()):
             try:
                 year = ts[0:4]
                 month = ts[4:6]
@@ -202,7 +210,8 @@ async def get_available_timesteps(
                 timestamps.append({
                     "timestamp": ts,
                     "datetime": dt.isoformat() + "Z",
-                    "date_folder": f"{year}-{month}-{day}"
+                    "date_folder": f"{year}-{month}-{day}",
+                    "available_bands": list(bands)
                 })
             except ValueError:
                 continue
@@ -210,7 +219,7 @@ async def get_available_timesteps(
         return {
             "timestamps": timestamps,
             "count": len(timestamps),
-            "band": band
+            "all_bands": list(BANDS.keys())
         }
 
     except Exception as e:
@@ -278,6 +287,11 @@ async def get_tile(
                 # Matplotlib colormap for satellite
                 from matplotlib import cm
                 from matplotlib.colors import Normalize
+
+                # Debug: log actual data range
+                data_min = float(np.nanmin(data))
+                data_max = float(np.nanmax(data))
+                print(f"[DEBUG] Band {band}: data range [{data_min:.2f}, {data_max:.2f}], config range [{config.min}, {config.max}]")
 
                 cmap = cm.get_cmap(config.colormap)
                 if config.invert:
