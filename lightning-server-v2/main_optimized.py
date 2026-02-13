@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from functools import lru_cache
 
 import numpy as np
+import requests
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.responses import Response, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -47,11 +48,12 @@ PORT = int(os.getenv("PORT", "3001"))
 # GCS client for signed URLs (lazy initialization)
 _gcs_client = None
 _gcs_bucket_name = None
+_gcs_service_account_email = None
 
 
 def get_gcs_client():
     """Get or create GCS client for signed URL generation."""
-    global _gcs_client, _gcs_bucket_name
+    global _gcs_client, _gcs_bucket_name, _gcs_service_account_email
     if _gcs_client is None:
         _gcs_client = storage.Client()
         # Extract bucket name from URL
@@ -59,7 +61,21 @@ def get_gcs_client():
             _gcs_bucket_name = BUCKET_BASE_URL.replace("gs://", "").split("/")[0]
         else:
             _gcs_bucket_name = BUCKET_BASE_URL.replace("https://storage.googleapis.com/", "").split("/")[0]
-    return _gcs_client, _gcs_bucket_name
+
+        # Get service account email for IAM Sign Blob API (needed for Cloud Run)
+        # This allows generating signed URLs without a private key
+        _gcs_service_account_email = os.getenv("GOOGLE_SERVICE_ACCOUNT_EMAIL")
+        if _gcs_service_account_email is None:
+            # Try to get from GCP metadata server (automatic on Cloud Run)
+            try:
+                metadata_url = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email"
+                resp = requests.get(metadata_url, headers={"Metadata-Flavor": "Google"}, timeout=2)
+                if resp.status_code == 200:
+                    _gcs_service_account_email = resp.text.strip()
+            except Exception:
+                pass  # Not running on GCP or metadata not available
+
+    return _gcs_client, _gcs_bucket_name, _gcs_service_account_email
 
 # Band configuration - matches inference output naming
 class BandConfig(BaseModel):
@@ -119,15 +135,19 @@ def get_cog_url(timestamp: str, band: str, signed: bool = True) -> str:
 
     if signed and BUCKET_BASE_URL.startswith("gs://"):
         # Generate signed URL for private bucket access
-        client, bucket_name = get_gcs_client()
+        client, bucket_name, service_account_email = get_gcs_client()
         bucket = client.bucket(bucket_name)
         blob = bucket.blob(blob_path)
         # Signed URL valid for 1 hour
-        return blob.generate_signed_url(
-            version="v4",
-            expiration=timedelta(hours=1),
-            method="GET"
-        )
+        # Use service_account_email to leverage IAM Sign Blob API (required on Cloud Run)
+        signed_url_kwargs = {
+            "version": "v4",
+            "expiration": timedelta(hours=1),
+            "method": "GET"
+        }
+        if service_account_email:
+            signed_url_kwargs["service_account_email"] = service_account_email
+        return blob.generate_signed_url(**signed_url_kwargs)
     else:
         # Public URL or local file
         return f"{BUCKET_BASE_URL}/{date_folder}/forecast_{timestamp}_{band}.tiff"
@@ -201,7 +221,7 @@ async def get_available_timesteps(
     """
     try:
         # Initialize GCS client using the helper
-        storage_client, bucket_name = get_gcs_client()
+        storage_client, bucket_name, _ = get_gcs_client()
         bucket = storage_client.bucket(bucket_name)
 
         # Track timestamps and their available bands
