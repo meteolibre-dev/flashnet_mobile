@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  titiler:
+    build: .
+    container_name: lightning-titiler
+    ports:
+      - "8080:8080"
+    environment:
+      - BUCKET_BASE_URL=https://storage.googleapis.com/inference_result/forecasts
+      - PORT=8080
+      - CACHE_DIR=/app/cache
+      - MAX_CACHE_SIZE_GB=10
+      - GDAL_DISABLE_READDIR_ON_OPEN=EMPTY_DIR
+      - GDAL_CACHEMAX=500
+      - RASTERIO_BLOCK_CACHE=1GB
+    volumes:
+      - titiler_cache:/app/cache
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 2G
+
+volumes:
+  titiler_cache:
+    driver: local
