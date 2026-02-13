@@ -6,7 +6,8 @@ Leverages COG internal overviews for instant low-zoom tiles.
 """
 
 import os
-from typing import Dict, Optional
+import re
+from typing import Dict, Optional, Set
 from datetime import datetime, timedelta
 from functools import lru_cache
 
@@ -19,6 +20,9 @@ from pydantic import BaseModel
 import rasterio
 from rasterio.warp import transform_bounds
 from rio_tiler.io import COGReader
+
+# Google Cloud Storage for bucket listing
+from google.cloud import storage
 
 # Configuration
 app = FastAPI(
@@ -146,6 +150,69 @@ async def list_times(hours: int = Query(24, ge=1, le=72)):
         "timestamps": timestamps,
         "count": len(timestamps)
     }
+
+
+@app.get("/available")
+async def get_available_timesteps(
+    days: int = Query(2, ge=1, le=7, description="Number of days to scan"),
+    band: str = Query("lightning", description="Band to check for availability")
+):
+    """
+    Scan the GCS bucket for available timesteps.
+    Returns actual timestamps that have data in the bucket.
+    """
+    # Extract bucket name from URL
+    bucket_name = BUCKET_BASE_URL.replace("https://storage.googleapis.com/", "").split("/")[0]
+
+    try:
+        # Initialize GCS client
+        storage_client = storage.Client()
+        bucket = storage_client.bucket(bucket_name)
+
+        found_timestamps: Set[str] = set()
+        now = datetime.utcnow()
+
+        # Scan for each day
+        for i in range(days):
+            d = now - timedelta(days=i)
+            date_folder = d.strftime("%Y-%m-%d")
+            prefix = f"forecasts/{date_folder}/"
+
+            # List blobs with this prefix
+            blobs = bucket.list_blobs(prefix=prefix, max_results=500)
+
+            for blob in blobs:
+                # Pattern: forecasts/YYYY-MM-DD/forecast_YYYYMMDDHHMM_lightning.tiff
+                match = re.search(r"forecast_(\d{12})_" + re.escape(band) + r"\.tiff$", blob.name)
+                if match:
+                    found_timestamps.add(match.group(1))
+
+        # Convert to sorted list with datetime info
+        timestamps = []
+        for ts in sorted(found_timestamps):
+            try:
+                year = ts[0:4]
+                month = ts[4:6]
+                day = ts[6:8]
+                hour = ts[8:10]
+                minute = ts[10:12]
+                dt = datetime(int(year), int(month), int(day), int(hour), int(minute))
+                timestamps.append({
+                    "timestamp": ts,
+                    "datetime": dt.isoformat() + "Z",
+                    "date_folder": f"{year}-{month}-{day}"
+                })
+            except ValueError:
+                continue
+
+        return {
+            "timestamps": timestamps,
+            "count": len(timestamps),
+            "band": band
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error scanning bucket: {str(e)}")
 
 
 @app.get("/times/{timestamp}")
