@@ -44,6 +44,23 @@ app.add_middleware(
 BUCKET_BASE_URL = os.getenv("BUCKET_BASE_URL", "gs://inference_result/forecasts")
 PORT = int(os.getenv("PORT", "3001"))
 
+# GCS client for signed URLs (lazy initialization)
+_gcs_client = None
+_gcs_bucket_name = None
+
+
+def get_gcs_client():
+    """Get or create GCS client for signed URL generation."""
+    global _gcs_client, _gcs_bucket_name
+    if _gcs_client is None:
+        _gcs_client = storage.Client()
+        # Extract bucket name from URL
+        if BUCKET_BASE_URL.startswith("gs://"):
+            _gcs_bucket_name = BUCKET_BASE_URL.replace("gs://", "").split("/")[0]
+        else:
+            _gcs_bucket_name = BUCKET_BASE_URL.replace("https://storage.googleapis.com/", "").split("/")[0]
+    return _gcs_client, _gcs_bucket_name
+
 # Band configuration - matches inference output naming
 class BandConfig(BaseModel):
     name: str
@@ -87,16 +104,33 @@ BANDS: Dict[str, BandConfig] = {
 }
 
 
-def get_cog_url(timestamp: str, band: str) -> str:
+def get_cog_url(timestamp: str, band: str, signed: bool = True) -> str:
     """
     Generate the COG URL for a given timestamp and band.
     Matches the naming convention from inference_engine.py:
     - forecast_{timestamp}_sat_ch{0,1,...}.tiff
     - forecast_{timestamp}_lightning.tiff
+
+    If signed=True (default), generates a signed URL for private bucket access.
     """
     # Convert YYYYMMDD to YYYY-MM-DD for bucket path
     date_folder = f"{timestamp[:4]}-{timestamp[4:6]}-{timestamp[6:8]}"
-    return f"{BUCKET_BASE_URL}/{date_folder}/forecast_{timestamp}_{band}.tiff"
+    blob_path = f"forecasts/{date_folder}/forecast_{timestamp}_{band}.tiff"
+
+    if signed and BUCKET_BASE_URL.startswith("gs://"):
+        # Generate signed URL for private bucket access
+        client, bucket_name = get_gcs_client()
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(blob_path)
+        # Signed URL valid for 1 hour
+        return blob.generate_signed_url(
+            version="v4",
+            expiration=timedelta(hours=1),
+            method="GET"
+        )
+    else:
+        # Public URL or local file
+        return f"{BUCKET_BASE_URL}/{date_folder}/forecast_{timestamp}_{band}.tiff"
 
 
 # Custom colormap for lightning (yellow -> red)
@@ -165,15 +199,9 @@ async def get_available_timesteps(
     Returns actual timestamps that have data in the bucket.
     For each timestamp, also indicates which other bands are available.
     """
-    # Extract bucket name from URL (handles both gs:// and https:// formats)
-    if BUCKET_BASE_URL.startswith("gs://"):
-        bucket_name = BUCKET_BASE_URL.replace("gs://", "").split("/")[0]
-    else:
-        bucket_name = BUCKET_BASE_URL.replace("https://storage.googleapis.com/", "").split("/")[0]
-
     try:
-        # Initialize GCS client
-        storage_client = storage.Client()
+        # Initialize GCS client using the helper
+        storage_client, bucket_name = get_gcs_client()
         bucket = storage_client.bucket(bucket_name)
 
         # Track timestamps and their available bands
