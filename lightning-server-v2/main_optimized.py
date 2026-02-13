@@ -363,6 +363,9 @@ async def get_bounds(
 
     url = get_cog_url(time, band)
 
+    # Default bounds for Europe region (matching frontend REGION)
+    default_bounds = [-10.0, 33.0, 33.0, 65.0]  # [west, south, east, north]
+
     try:
         with rasterio.open(url) as cog:
             bounds = cog.bounds
@@ -386,8 +389,29 @@ async def get_bounds(
                 "overviews": cog.overviews(1) if hasattr(cog, 'overviews') else []
             })
 
+    except rasterio.errors.RasterioIOError as e:
+        # File doesn't exist or can't be read - return default bounds
+        # This allows the frontend to continue working even if some files are missing
+        return JSONResponse({
+            "url": url,
+            "bounds": default_bounds,
+            "crs": "EPSG:4326",
+            "size": None,
+            "nodata": None,
+            "overviews": [],
+            "error": "File not found, using default bounds"
+        })
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        # Other errors - return default bounds with error info
+        return JSONResponse({
+            "url": url,
+            "bounds": default_bounds,
+            "crs": "EPSG:4326",
+            "size": None,
+            "nodata": None,
+            "overviews": [],
+            "error": str(e)
+        })
 
 
 @app.get("/info")
