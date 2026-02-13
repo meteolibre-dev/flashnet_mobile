@@ -40,7 +40,8 @@ app.add_middleware(
 )
 
 # Environment variables
-BUCKET_BASE_URL = os.getenv("BUCKET_BASE_URL", "https://storage.googleapis.com/inference_result/forecasts")
+# Use gs:// for private buckets (requires GCS credentials), https:// for public buckets
+BUCKET_BASE_URL = os.getenv("BUCKET_BASE_URL", "gs://inference_result/forecasts")
 PORT = int(os.getenv("PORT", "3001"))
 
 # Band configuration - matches inference output naming
@@ -164,8 +165,11 @@ async def get_available_timesteps(
     Returns actual timestamps that have data in the bucket.
     For each timestamp, also indicates which other bands are available.
     """
-    # Extract bucket name from URL
-    bucket_name = BUCKET_BASE_URL.replace("https://storage.googleapis.com/", "").split("/")[0]
+    # Extract bucket name from URL (handles both gs:// and https:// formats)
+    if BUCKET_BASE_URL.startswith("gs://"):
+        bucket_name = BUCKET_BASE_URL.replace("gs://", "").split("/")[0]
+    else:
+        bucket_name = BUCKET_BASE_URL.replace("https://storage.googleapis.com/", "").split("/")[0]
 
     try:
         # Initialize GCS client

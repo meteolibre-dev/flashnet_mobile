@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y \
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 ENV PORT=8080
-ENV BUCKET_BASE_URL=https://storage.googleapis.com/inference_result/forecasts
+ENV BUCKET_BASE_URL=gs://inference_result/forecasts
 # GDAL optimization for Cloud Run
 ENV GDAL_DISABLE_READDIR_ON_OPEN=EMPTY_DIR
 ENV GDAL_CACHEMAX=500
