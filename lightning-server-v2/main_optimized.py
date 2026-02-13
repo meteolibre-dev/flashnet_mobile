@@ -288,21 +288,21 @@ async def get_tile(
                 from matplotlib import cm
                 from matplotlib.colors import Normalize
 
-                # Debug: log actual data range
-                data_min = float(np.nanmin(data))
-                data_max = float(np.nanmax(data))
-                print(f"[DEBUG] Band {band}: data range [{data_min:.2f}, {data_max:.2f}], config range [{config.min}, {config.max}]")
+                # Calculate actual data range - include all values
+                actual_min = float(np.nanmin(data))
+                actual_max = float(np.nanmax(data))
 
                 cmap = cm.get_cmap(config.colormap)
                 if config.invert:
                     cmap = cmap.reversed()
 
-                norm = Normalize(vmin=config.min, vmax=config.max)
+                # Use actual data range for normalization
+                norm = Normalize(vmin=actual_min, vmax=actual_max)
                 normalized = norm(data.astype(float))
                 rgba = (cmap(normalized) * 255).astype(np.uint8)
-                rgba[:, :, 3] = 255
+                rgba[:, :, 3] = 255  # Make fully opaque
 
-                # Handle nodata
+                # Only handle nodata if there's an explicit mask
                 if tile.mask is not None:
                     rgba[~tile.mask] = [0, 0, 0, 0]
 
