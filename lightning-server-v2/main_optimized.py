@@ -434,6 +434,12 @@ async def get_tilejson(
             else:
                 minx, miny, maxx, maxy = bounds.left, bounds.bottom, bounds.right, bounds.top
 
+            # Check for NaN/inf values and use default bounds if invalid
+            import math
+            default_bounds = [-10.0, 33.0, 33.0, 65.0]
+            if any(not math.isfinite(v) for v in [minx, miny, maxx, maxy]):
+                minx, miny, maxx, maxy = default_bounds
+
         return JSONResponse({
             "tilejson": "2.1.0",
             "name": f"{BANDS[band].name} - {time}",
@@ -490,13 +496,24 @@ async def get_bounds(
                 minx, miny, maxx, maxy = bounds.left, bounds.bottom, bounds.right, bounds.top
                 crs = str(cog.crs) if cog.crs else "EPSG:4326"
 
+            # Check for NaN/inf values and use default bounds if invalid
+            import math
+            if any(not math.isfinite(v) for v in [minx, miny, maxx, maxy]):
+                minx, miny, maxx, maxy = default_bounds
+                crs = "EPSG:4326"
+
+            # Handle nodata - could be NaN
+            nodata = cog.nodata
+            if nodata is not None and not math.isfinite(nodata):
+                nodata = None
+
             return JSONResponse({
                 "url": url,
                 "bounds": [minx, miny, maxx, maxy],
                 "crs": crs,
                 "size": [cog.width, cog.height],
-                "nodata": cog.nodata,
-                "overviews": cog.overviews(1) if hasattr(cog, 'overviews') else []
+                "nodata": nodata,
+                "overviews": list(cog.overviews(1)) if hasattr(cog, 'overviews') else []
             })
 
     except rasterio.errors.RasterioIOError as e:
@@ -537,13 +554,24 @@ async def get_info(
 
     try:
         with rasterio.open(url) as cog:
+            import math
+
+            # Handle bounds - check for NaN/inf
+            bounds = list(cog.bounds)
+            bounds = [b if math.isfinite(b) else None for b in bounds]
+
+            # Handle nodata - could be NaN
+            nodata = cog.nodata
+            if nodata is not None and not math.isfinite(nodata):
+                nodata = None
+
             return JSONResponse({
                 "url": url,
                 "driver": cog.driver,
                 "crs": str(cog.crs) if cog.crs else None,
-                "bounds": list(cog.bounds),
+                "bounds": bounds,
                 "size": [cog.width, cog.height],
-                "nodata": cog.nodata,
+                "nodata": nodata,
                 "dtypes": [cog.dtypes[0]],
                 "overviews": list(cog.overviews(1)) if hasattr(cog, 'overviews') else [],
                 "band_config": BANDS[band].dict()
