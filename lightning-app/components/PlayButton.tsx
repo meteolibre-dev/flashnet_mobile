@@ -70,9 +70,14 @@ const PlayButton: React.FC<PlayButtonProps> = ({
 
   return (
     <TouchableOpacity
-      onPress={onPress}
-      style={[styles.container, { width: size, height: size }]}
-      activeOpacity={0.7}
+      onPress={isDownloading ? undefined : onPress}
+      style={[
+        styles.container,
+        { width: size, height: size },
+        isDownloading && styles.disabled,
+      ]}
+      activeOpacity={isDownloading ? 1 : 0.7}
+      disabled={isDownloading}
     >
       <Svg width={size} height={size}>
         {/* Background circle */}
@@ -111,6 +116,9 @@ const styles = StyleSheet.create({
   container: {
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  disabled: {
+    opacity: 0.5,
   },
 });
 

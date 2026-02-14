@@ -6,75 +6,152 @@ export const REGION = {
   south: 33.0,
 };
 
-export const BASE_BUCKET_URL = "https://storage.googleapis.com/inference_result/forecasts";
+// Lightning Server V2 - Cloud Run deployment
+export const SERVER_URL = "https://lightning-server-v2-935480850831.europe-west3.run.app";
 
-export const SERVER_URL = "https://lightning-server-935480850831.europe-west3.run.app";
-
-export const CHANNELS = [
+// Bands available in the new backend
+export const BANDS = [
   { id: 'lightning', label: 'Lightning' },
   { id: 'sat_ch0', label: 'VIS (Ch0)' },
   { id: 'sat_ch1', label: 'IR (Ch1)' },
 ];
 
+// Keep CHANNELS as alias for backward compatibility
+export const CHANNELS = BANDS;
+
 export interface Timestep {
-  dateFolder: string;
-  filenameTime: string;
-  label: string;
-  fullDate: Date;
+  timestamp: string;      // YYYYMMDDHHMM format
+  datetime: string;       // ISO format
+  dateFolder: string;     // YYYY-MM-DD format
+  label: string;          // Display label (HH:MM)
+  fullDate: Date;         // Date object
+  availableBands?: string[]; // Which bands are available
 }
 
-// Helper to parse timesteps - matches any channel (lightning, sat_ch0, sat_ch1, etc.)
-const parseTimestep = (item: any, dateFolder: string): Timestep | null => {
-  const match = item.name.match(/forecast_(\d{12})_[\w-]+\.tiff$/);
-  if (match) {
-    const filenameTime = match[1];
-    const year = filenameTime.substring(0, 4);
-    const month = filenameTime.substring(4, 6);
-    const day = filenameTime.substring(6, 8);
-    const hour = filenameTime.substring(8, 10);
-    const minute = filenameTime.substring(10, 12);
-
-    const fullDate = new Date(`${year}-${month}-${day}T${hour}:${minute}:00Z`);
-
-    return {
-      dateFolder,
-      filenameTime,
-      label: `${hour}h${minute}`,
-      fullDate
-    };
-  }
-  return null;
+// Parse timestamp to Date object
+const parseTimestamp = (timestamp: string): Date => {
+  const year = timestamp.substring(0, 4);
+  const month = timestamp.substring(4, 6);
+  const day = timestamp.substring(6, 8);
+  const hour = timestamp.substring(8, 10);
+  const minute = timestamp.substring(10, 12);
+  return new Date(`${year}-${month}-${day}T${hour}:${minute}:00Z`);
 };
 
+// Format timestamp for display
+const formatLabel = (timestamp: string): string => {
+  const hour = timestamp.substring(8, 10);
+  const minute = timestamp.substring(10, 12);
+  return `${hour}:${minute}`;
+};
+
+// Get date folder from timestamp
+const getDateFolder = (timestamp: string): string => {
+  return `${timestamp.substring(0, 4)}-${timestamp.substring(4, 6)}-${timestamp.substring(6, 8)}`;
+};
+
+// Fetch available timesteps from the new backend
 export const scanAvailableTimesteps = async (maxTimesteps: number = 18): Promise<Timestep[]> => {
-  const availableTimesteps: Timestep[] = [];
-  const now = new Date();
-
-  const datesToCheck = [];
-  for (let i = 0; i < 2; i++) {
-    const d = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
-    datesToCheck.push(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`);
-  }
-
-  for (const dateFolder of datesToCheck) {
-    const listUrl = `https://storage.googleapis.com/storage/v1/b/inference_result/o?prefix=forecasts/${dateFolder}/`;
-    try {
-      const response = await fetch(listUrl);
-      if (response.ok) {
-        const data = await response.json();
-        if (data.items) {
-          for (const item of data.items) {
-            const parsed = parseTimestep(item, dateFolder);
-            if (parsed && !availableTimesteps.find(s => s.filenameTime === parsed.filenameTime)) {
-              availableTimesteps.push(parsed);
-            }
-          }
-        }
-      }
-    } catch (error) {
-      console.error(`Error listing files for ${dateFolder}:`, error);
+  try {
+    // Use the /available endpoint from the new backend
+    const response = await fetch(`${SERVER_URL}/available?days=2`);
+    
+    if (!response.ok) {
+      console.error('Failed to fetch available timesteps from server');
+      return [];
     }
+    
+    const data = await response.json();
+    
+    if (!data.timestamps || data.timestamps.length === 0) {
+      console.log('No timestamps available from server');
+      return [];
+    }
+    
+    // Convert to our Timestep format
+    const timesteps: Timestep[] = data.timestamps.map((ts: any) => ({
+      timestamp: ts.timestamp,
+      datetime: ts.datetime,
+      dateFolder: ts.date_folder || getDateFolder(ts.timestamp),
+      label: formatLabel(ts.timestamp),
+      fullDate: parseTimestamp(ts.timestamp),
+      availableBands: ts.available_bands || [],
+    }));
+    
+    // Sort by date and take the last maxTimesteps
+    return timesteps
+      .sort((a, b) => a.fullDate.getTime() - b.fullDate.getTime())
+      .slice(-maxTimesteps);
+    
+  } catch (error) {
+    console.error('Error fetching available timesteps:', error);
+    return [];
   }
-
-  return availableTimesteps.sort((a, b) => a.fullDate.getTime() - b.fullDate.getTime()).slice(-maxTimesteps);
 };
+
+// Generate tile URL for the new backend
+export const getTileUrl = (timestamp: string, band: string): string => {
+  return `${SERVER_URL}/tiles/{z}/{x}/{y}.png?band=${band}&time=${timestamp}`;
+};
+
+// Fetch bounds for a specific band and time
+export const fetchBounds = async (timestamp: string, band: string): Promise<[number, number, number, number] | null> => {
+  try {
+    const response = await fetch(`${SERVER_URL}/bounds?band=${band}&time=${timestamp}`);
+    
+    if (!response.ok) {
+      return null;
+    }
+    
+    const data = await response.json();
+    return data.bounds as [number, number, number, number]; // [west, south, east, north]
+  } catch (error) {
+    console.error('Error fetching bounds:', error);
+    return null;
+  }
+};
+
+// Fetch TileJSON for map integration
+export const fetchTileJSON = async (timestamp: string, band: string): Promise<any | null> => {
+  try {
+    const response = await fetch(`${SERVER_URL}/tilejson?band=${band}&time=${timestamp}`);
+    
+    if (!response.ok) {
+      return null;
+    }
+    
+    return await response.json();
+  } catch (error) {
+    console.error('Error fetching TileJSON:', error);
+    return null;
+  }
+};
+
+// Point forecast - the new backend needs this endpoint added
+// For now, we'll need to either add this endpoint or use a workaround
+export const fetchPointForecast = async (
+  lat: number, 
+  lon: number, 
+  band: string
+): Promise<any | null> => {
+  try {
+    // The new backend may not have this endpoint yet
+    // We'll try to call it, and if it fails, we'll handle gracefully
+    const response = await fetch(
+      `${SERVER_URL}/point?lat=${lat}&lon=${lon}&band=${band}`
+    );
+    
+    if (!response.ok) {
+      console.warn('Point forecast endpoint not available');
+      return null;
+    }
+    
+    return await response.json();
+  } catch (error) {
+    console.error('Error fetching point forecast:', error);
+    return null;
+  }
+};
+
+// Legacy exports for backward compatibility
+export const BASE_BUCKET_URL = "https://storage.googleapis.com/inference_result/forecasts";

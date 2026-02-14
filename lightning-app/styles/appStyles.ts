@@ -15,6 +15,27 @@ export const styles = StyleSheet.create({
   map: {
     flex: 1,
   },
+  mapContainer: {
+    flex: 1,
+    position: 'relative',
+  },
+  mapLegendOverlay: {
+    position: 'absolute',
+    top: 10,
+    right: 10,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    borderRadius: 8,
+    padding: 6,
+    zIndex: 100,
+  },
+  scatterThunderContainer: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 50,
+  },
 
   // Search
   searchContainer: {
@@ -201,17 +222,14 @@ export const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: 'rgba(0,0,0,0.8)',
     borderRadius: 20,
     padding: 8,
     paddingLeft: 12,
-    borderWidth: 1,
-    borderColor: '#333',
     marginBottom: 10,
   },
   channelRow: {
     flexDirection: 'row',
-    backgroundColor: 'rgba(255,255,255,0.1)',
+    backgroundColor: 'rgba(0,0,0,0.8)',
     borderRadius: 20,
     padding: 2,
   },
