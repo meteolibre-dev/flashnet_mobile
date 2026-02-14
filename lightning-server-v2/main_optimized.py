@@ -52,6 +52,14 @@ app.add_middleware(
 BUCKET_BASE_URL = os.getenv("BUCKET_BASE_URL", "gs://inference_result/forecasts")
 PORT = int(os.getenv("PORT", "3001"))
 
+# Region bounds for point queries (matches frontend REGION)
+REGION = {
+    "west": -10.0,
+    "north": 65.0,
+    "east": 33.0,
+    "south": 33.0,
+}
+
 # GCS client for signed URLs (lazy initialization)
 _gcs_client = None
 _gcs_bucket_name = None
@@ -599,6 +607,78 @@ async def get_info(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/point")
+async def get_point_forecast(
+    lat: float = Query(..., description="Latitude"),
+    lon: float = Query(..., description="Longitude"),
+    band: str = Query("lightning", description="Band to query")
+):
+    """
+    Get forecast values at a specific point for all available timesteps.
+    Returns a time series for the selected band at the given coordinates.
+    """
+    if band not in BANDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid band: {band}. Available: {list(BANDS.keys())}"
+        )
+
+    # Validate coordinates are within region
+    if not (REGION["south"] <= lat <= REGION["north"] and 
+            REGION["west"] <= lon <= REGION["east"]):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Coordinates out of bounds. Region: {REGION}"
+        )
+
+    # Get available timestamps
+    try:
+        available = await get_available_timesteps(days=2, band=band)
+        timestamps = available["timestamps"]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting timestamps: {str(e)}")
+
+    # Sample values at each timestep
+    results = []
+    for ts in timestamps[-18:]:  # Last 18 timesteps
+        timestamp = ts["timestamp"]
+        try:
+            url = get_cog_url(timestamp, band)
+            with rasterio.open(url) as cog:
+                # Transform lat/lon to pixel coordinates
+                from rasterio.transform import rowcol
+                row, col = rowcol(cog.transform, lon, lat)
+                
+                # Read value at point
+                if 0 <= row < cog.height and 0 <= col < cog.width:
+                    value = cog.read(1)[row, col]
+                    
+                    # Handle nodata
+                    if cog.nodata is not None and value == cog.nodata:
+                        value = None
+                    elif not np.isfinite(value):
+                        value = None
+                else:
+                    value = None
+                    
+            results.append({
+                "timestamp": timestamp,
+                "value": float(value) if value is not None else None
+            })
+        except Exception as e:
+            logger.warning(f"Error reading point at {timestamp}: {e}")
+            results.append({
+                "timestamp": timestamp,
+                "value": None
+            })
+
+    return {
+        "coordinates": {"lat": lat, "lon": lon},
+        "band": band,
+        "timesteps": results
+    }
 
 
 @app.get("/health")
