@@ -24,6 +24,8 @@ from rio_tiler.io import COGReader
 
 # Google Cloud Storage for bucket listing
 from google.cloud import storage
+from google.auth import compute_engine
+from google.auth.transport.requests import Request
 
 # Configuration
 app = FastAPI(
@@ -76,6 +78,18 @@ def get_gcs_client():
                 pass  # Not running on GCP or metadata not available
 
     return _gcs_client, _gcs_bucket_name, _gcs_service_account_email
+
+
+def get_signing_credentials(service_account_email: str):
+    """Get signing credentials for Cloud Run/Compute Engine environments."""
+    auth_request = Request()
+    signing_credentials = compute_engine.IDTokenCredentials(
+        auth_request,
+        "",
+        service_account_email=service_account_email
+    )
+    return signing_credentials
+
 
 # Band configuration - matches inference output naming
 class BandConfig(BaseModel):
@@ -138,16 +152,22 @@ def get_cog_url(timestamp: str, band: str, signed: bool = True) -> str:
         client, bucket_name, service_account_email = get_gcs_client()
         bucket = client.bucket(bucket_name)
         blob = bucket.blob(blob_path)
-        # Signed URL valid for 1 hour
-        # Use service_account_email to leverage IAM Sign Blob API (required on Cloud Run)
-        signed_url_kwargs = {
-            "version": "v4",
-            "expiration": timedelta(hours=1),
-            "method": "GET"
-        }
+        # Use compute_engine.IDTokenCredentials for Cloud Run/Compute Engine
         if service_account_email:
-            signed_url_kwargs["service_account_email"] = service_account_email
-        return blob.generate_signed_url(**signed_url_kwargs)
+            signing_credentials = get_signing_credentials(service_account_email)
+            return blob.generate_signed_url(
+                version="v4",
+                expiration=timedelta(hours=1),
+                method="GET",
+                credentials=signing_credentials
+            )
+        else:
+            # Fallback to standard signed URL (requires private key)
+            return blob.generate_signed_url(
+                version="v4",
+                expiration=timedelta(hours=1),
+                method="GET"
+            )
     else:
         # Public URL or local file
         return f"{BUCKET_BASE_URL}/{date_folder}/forecast_{timestamp}_{band}.tiff"
