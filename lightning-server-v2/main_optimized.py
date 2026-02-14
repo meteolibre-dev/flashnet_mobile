@@ -392,7 +392,7 @@ async def get_tile(
 
                 # Only handle nodata if there's an explicit mask
                 if tile.mask is not None:
-                    rgba[~tile.mask] = [0, 0, 0, 0]
+                    rgba[~tile.mask.astype(bool)] = [0, 0, 0, 0]
 
             # Convert to PNG
             from io import BytesIO
