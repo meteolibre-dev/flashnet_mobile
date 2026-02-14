@@ -116,14 +116,14 @@ BANDS: Dict[str, BandConfig] = {
     ),
     "sat_ch0": BandConfig(
         name="Satellite Channel 0 (VIS)",
-        min=-2,
-        max=15,
+        min=0,
+        max=12,
         colormap="viridis",
         invert=False
     ),
     "sat_ch1": BandConfig(
         name="Satellite Channel 1 (IR)",
-        min=-3,
+        min=5,
         max=120,
         colormap="plasma",
         invert=True  # Inverted for IR (cold = bright)
