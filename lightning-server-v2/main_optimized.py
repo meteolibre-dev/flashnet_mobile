@@ -7,6 +7,7 @@ Leverages COG internal overviews for instant low-zoom tiles.
 
 import os
 import re
+import logging
 from typing import Dict, Optional, Set
 from datetime import datetime, timedelta
 from functools import lru_cache
@@ -26,6 +27,10 @@ from rio_tiler.io import COGReader
 from google.cloud import storage
 from google.auth import compute_engine
 from google.auth.transport.requests import Request
+
+# Logging configuration
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Configuration
 app = FastAPI(
@@ -333,6 +338,7 @@ async def get_tile(
         url = get_cog_url(time, band)
     except Exception as e:
         # Signed URL generation failed - return transparent tile
+        logger.error(f"Failed to generate signed URL for tile {z}/{x}/{y} band={band} time={time}: {e}")
         from io import BytesIO
         from PIL import Image
         img = Image.new('RGBA', (256, 256), (0, 0, 0, 0))
@@ -400,6 +406,7 @@ async def get_tile(
 
     except Exception as e:
         # Return transparent tile on error
+        logger.error(f"Error generating tile {z}/{x}/{y} band={band} time={time}: {e}", exc_info=True)
         from io import BytesIO
         from PIL import Image
 
