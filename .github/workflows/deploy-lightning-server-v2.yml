@@ -66,4 +66,4 @@ jobs:
             --memory 4Gi \
             --cpu 2 \
             --min-instances 1 \
-            --set-env-vars BUCKET_BASE_URL=gs://inference_result/forecasts
+            --set-env-vars BUCKET_BASE_URL=gs://inference_result/forecasts,GOOGLE_SERVICE_ACCOUNT_EMAIL=935480850831-compute@developer.gserviceaccount.com
