@@ -373,21 +373,15 @@ async def get_tile(
 
             else:
                 # Matplotlib colormap for satellite
+                # Data is already rescaled to 0-255, apply colormap directly
                 from matplotlib import cm
-                from matplotlib.colors import Normalize
-
-                # Use 0-255 range since data was already rescaled to that range
-                # This ensures consistent colormap across all tiles
-                actual_min = 0
-                actual_max = 255
 
                 cmap = cm.get_cmap(config.colormap)
                 if config.invert:
                     cmap = cmap.reversed()
 
-                # Use actual data range for normalization
-                norm = Normalize(vmin=actual_min, vmax=actual_max)
-                normalized = norm(data.astype(float))
+                # Normalize data to 0-1 range for colormap
+                normalized = data.astype(float) / 255.0
                 rgba = (cmap(normalized) * 255).astype(np.uint8)
                 rgba[:, :, 3] = 255  # Make fully opaque
 
