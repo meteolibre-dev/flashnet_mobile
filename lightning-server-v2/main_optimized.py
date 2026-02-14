@@ -354,6 +354,19 @@ async def get_tile(
             tile = cog.tile(x, y, z, tilesize=256, indexes=(1,))
             data = tile.data[0].astype(np.float32)
 
+            # Get nodata value from COG for fallback handling
+            nodata_value = cog.nodata if hasattr(cog, 'nodata') else None
+
+            # Create nodata mask BEFORE rescaling (handles NaN and explicit nodata)
+            nodata_mask = None
+            if nodata_value is not None:
+                nodata_mask = (data == nodata_value) | (~np.isfinite(data))
+            elif tile.mask is not None:
+                nodata_mask = ~tile.mask.astype(bool)
+            elif np.any(~np.isfinite(data)):
+                # Fallback: treat any non-finite values as nodata
+                nodata_mask = ~np.isfinite(data)
+
             # Apply rescaling
             data = np.clip(data, config.min, config.max)
             data = ((data - config.min) / (config.max - config.min) * 255).astype(np.uint8)
@@ -371,6 +384,10 @@ async def get_tile(
                 alpha = np.clip(data_float * 80, 0, 255).astype(np.uint8)
                 rgba[:, :, 3] = np.maximum(rgba[:, :, 3], alpha)
 
+                # Handle nodata - set transparent
+                if nodata_mask is not None:
+                    rgba[nodata_mask] = [0, 0, 0, 0]
+
             else:
                 # Matplotlib colormap for satellite
                 # Data is already rescaled to 0-255, apply colormap directly
@@ -385,9 +402,9 @@ async def get_tile(
                 rgba = (cmap(normalized) * 255).astype(np.uint8)
                 rgba[:, :, 3] = 255  # Make fully opaque
 
-                # Only handle nodata if there's an explicit mask
-                if tile.mask is not None:
-                    rgba[~tile.mask.astype(bool)] = [0, 0, 0, 0]
+                # Handle nodata - set transparent
+                if nodata_mask is not None:
+                    rgba[nodata_mask] = [0, 0, 0, 0]
 
             # Convert to PNG
             from io import BytesIO
