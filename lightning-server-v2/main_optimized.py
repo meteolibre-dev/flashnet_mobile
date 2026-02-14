@@ -376,9 +376,10 @@ async def get_tile(
                 from matplotlib import cm
                 from matplotlib.colors import Normalize
 
-                # Calculate actual data range - include all values
-                actual_min = float(np.nanmin(data))
-                actual_max = float(np.nanmax(data))
+                # Use 0-255 range since data was already rescaled to that range
+                # This ensures consistent colormap across all tiles
+                actual_min = 0
+                actual_max = 255
 
                 cmap = cm.get_cmap(config.colormap)
                 if config.invert:
