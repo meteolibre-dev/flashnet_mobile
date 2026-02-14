@@ -123,7 +123,7 @@ BANDS: Dict[str, BandConfig] = {
     ),
     "sat_ch1": BandConfig(
         name="Satellite Channel 1 (IR)",
-        min=5,
+        min=3,
         max=120,
         colormap="plasma",
         invert=True  # Inverted for IR (cold = bright)
@@ -180,7 +180,7 @@ def get_cog_url(timestamp: str, band: str, signed: bool = True) -> str:
 
 # Custom colormap for lightning (yellow -> red)
 LIGHTNING_CMAP = {
-    0: (0, 0, 0, 0),       # Transparent
+    0: (255, 255, 0, 150),  # Yellow
     1: (255, 255, 0, 180),  # Yellow
     2: (255, 200, 0, 210),  # Orange-yellow
     3: (255, 100, 0, 230),  # Orange
@@ -387,6 +387,10 @@ async def get_tile(
                 # Handle nodata - set transparent
                 if nodata_mask is not None:
                     rgba[nodata_mask] = [0, 0, 0, 0]
+
+                # Handle zero values - set transparent
+                zero_mask = data == 0
+                rgba[zero_mask] = [0, 0, 0, 0]
 
             else:
                 # Matplotlib colormap for satellite
