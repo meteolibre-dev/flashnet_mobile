@@ -390,7 +390,6 @@ async def get_tile(
 
             else:
                 # Matplotlib colormap for satellite
-                # Data is already rescaled to 0-255, apply colormap directly
                 from matplotlib import cm
 
                 cmap = cm.get_cmap(config.colormap)
@@ -401,6 +400,10 @@ async def get_tile(
                 normalized = data.astype(float) / 255.0
                 rgba = (cmap(normalized) * 255).astype(np.uint8)
                 rgba[:, :, 3] = 255  # Make fully opaque
+
+                # Set lowest values (0) to transparent (nodata/no signal)
+                zero_mask = data == 0
+                rgba[zero_mask] = [0, 0, 0, 0]
 
                 # Handle nodata - set transparent
                 if nodata_mask is not None:
