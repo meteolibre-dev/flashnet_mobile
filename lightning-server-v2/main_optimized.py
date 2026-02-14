@@ -373,24 +373,18 @@ async def get_tile(
 
             # Apply colormap
             if band == "lightning":
-                # Custom discrete colormap
                 rgba = np.zeros((256, 256, 4), dtype=np.uint8)
+
+                non_zero_mask = data > 0
+                rgba[non_zero_mask] = [255, 255, 0, 150]
+
                 for val, color in LIGHTNING_CMAP.items():
-                    mask = data == int(val * 255 / config.max)
-                    rgba[mask] = color
+                    if val > 0:
+                        mask = data >= int(val * 255 / config.max)
+                        rgba[mask] = color
 
-                # Gradient alpha for values between thresholds
-                data_float = data / 255 * config.max
-                alpha = np.clip(data_float * 80, 0, 255).astype(np.uint8)
-                rgba[:, :, 3] = np.maximum(rgba[:, :, 3], alpha)
-
-                # Handle nodata - set transparent
                 if nodata_mask is not None:
                     rgba[nodata_mask] = [0, 0, 0, 0]
-
-                # Handle zero values - set transparent
-                zero_mask = data == 0
-                rgba[zero_mask] = [0, 0, 0, 0]
 
             else:
                 # Matplotlib colormap for satellite
