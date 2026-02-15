@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
-import { View, Text, TouchableOpacity, Platform, StatusBar, TextInput, Image, ScrollView } from 'react-native';
+import { View, Text, TouchableOpacity, Platform, StatusBar, TextInput, Image, ScrollView, StyleSheet } from 'react-native';
 import MapLibreGL from '@maplibre/maplibre-react-native';
 import Svg, { Circle, Path, Polygon, Line } from 'react-native-svg';
 import RainbowSlider from './components/RainbowSlider';
@@ -10,10 +10,12 @@ import * as Font from 'expo-font';
 import {
   scanAvailableTimesteps,
   Timestep,
-  CHANNELS,
+  BANDS,
   SERVER_URL,
-  BASE_BUCKET_URL,
-  REGION
+  REGION,
+  getTileUrl,
+  getAnimationUrl,
+  fetchPointForecast as fetchPointForecastFromService
 } from './dataService';
 import { styles } from './styles';
 
@@ -31,6 +33,23 @@ const OSM_VECTOR_STYLE = `https://api.maptiler.com/maps/basic-v2/style.json?key=
 
 // CartoCDN Light - free, simple map perfect for weather overlays
 const CARTOLIGHT_STYLE = 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json';
+
+// Tile calculation utilities
+const latLngToTile = (lat: number, lng: number, zoom: number) => {
+  const n = Math.pow(2, zoom);
+  const x = Math.floor((lng + 180) / 360 * n);
+  const latRad = lat * Math.PI / 180;
+  const y = Math.floor((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * n);
+  return { x: Math.max(0, Math.min(n - 1, x)), y: Math.max(0, Math.min(n - 1, y)) };
+};
+
+const getTileBounds = (zoom: number) => {
+  const n = Math.pow(2, zoom);
+  return {
+    minX: 0, maxX: n - 1,
+    minY: 0, maxY: n - 1
+  };
+};
 
 // --- Icons ---
 const MapIcon = ({ active }: { active: boolean }) => (
@@ -51,7 +70,7 @@ const LocationIcon = ({ active }: { active: boolean }) => (
 export default function App() {
   const [timesteps, setTimesteps] = useState<Timestep[]>([]);
   const [selectedStep, setSelectedStep] = useState<Timestep | null>(null);
-  const [selectedChannel, setSelectedChannel] = useState(CHANNELS[0]);
+  const [selectedBand, setSelectedBand] = useState(BANDS[0]);
   const [isScanning, setIsScanning] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<any[]>([]);
@@ -62,8 +81,14 @@ export default function App() {
 
   // Double buffering for smooth playback
   const [activeLayerIndex, setActiveLayerIndex] = useState(0);
+  const activeLayerIndexRef = useRef(0);
   const [bufferUrls, setBufferUrls] = useState<[string | null, string | null]>([null, null]);
   const lastProcessedUrl = useRef<string | null>(null);
+
+  // Keep ref in sync with state
+  useEffect(() => {
+    activeLayerIndexRef.current = activeLayerIndex;
+  }, [activeLayerIndex]);
 
   // Playback state
   const [isPlaying, setIsPlaying] = useState(false);
@@ -72,6 +97,10 @@ export default function App() {
   const playInterval = useRef<NodeJS.Timeout | null>(null);
   const cachedTileUrls = useRef<Map<string, string>>(new Map());
   const pendingFrame = useRef<boolean>(false); // Track if a frame is waiting to be displayed
+  const currentLoadedTimestamp = useRef<number | null>(null); // Track the timestamp of the currently loaded frame
+
+  // Animation overlay state
+  const [animationUrl, setAnimationUrl] = useState<string | null>(null);
 
   // Load custom font for splash screen
   useEffect(() => {
@@ -83,7 +112,10 @@ export default function App() {
   }, []);
 
   const cameraRef = useRef<any>(null);
+  const mapRef = useRef<any>(null);
   const [userLocation, setUserLocation] = useState<[number, number] | null>(null);
+  const [mapBounds, setMapBounds] = useState<{ ne: [number, number], sw: [number, number] } | null>(null);
+  const [mapZoom, setMapZoom] = useState(4);
 
   // Region boundary GeoJSON
   const regionGeoJSON = useMemo(() => ({
@@ -217,12 +249,12 @@ export default function App() {
     initTimesteps();
   }, []);
 
-  // Refresh point forecast when channel changes
+  // Refresh point forecast when band changes
   useEffect(() => {
     if (userLocation && (showPointForecast || currentTab === 'local')) {
-      fetchPointForecast(userLocation[1], userLocation[0], selectedChannel.id);
+      fetchPointForecast(userLocation[1], userLocation[0], selectedBand.id);
     }
-  }, [selectedChannel.id, userLocation, showPointForecast, currentTab]);
+  }, [selectedBand.id, userLocation, showPointForecast, currentTab]);
 
   // Playback Logic
   useEffect(() => {
@@ -231,43 +263,81 @@ export default function App() {
     };
   }, []);
 
-  // Prefetch tiles for all timesteps
-  const prefetchTilesForChannel = useCallback(async (channelId: string) => {
+  // Prefetch tiles - optimized to only fetch visible tiles at current zoom level
+  const prefetchTilesForBand = useCallback(async (bandId: string, zoom: number, bounds: { ne: [number, number], sw: [number, number] } | null) => {
     if (timesteps.length === 0) return;
 
     setIsDownloading(true);
     setDownloadProgress(0);
 
-    const totalSteps = timesteps.length;
-    let completedSteps = 0;
+    let visibleTiles: { x: number, y: number }[] = [];
 
-    // Generate tile URLs for all timesteps
-    for (const step of timesteps) {
-      const tiffUrl = `${BASE_BUCKET_URL}/${step.dateFolder}/forecast_${step.filenameTime}_${channelId}.tiff`;
-      const tileUrlTemplate = `${SERVER_URL}/tiles/{z}/{x}/{y}.png?url=${encodeURIComponent(tiffUrl)}&channel=${channelId}`;
+    // Calculate visible tiles from current map bounds
+    if (bounds) {
+      const { ne, sw } = bounds;
+      const topLeft = latLngToTile(ne[1], sw[0], zoom);
+      const bottomRight = latLngToTile(sw[1], ne[0], zoom);
 
-      // Store in cache map
-      cachedTileUrls.current.set(step.filenameTime, tileUrlTemplate);
-
-      // Warm up the server cache by requesting metadata or a sample tile
-      // We'll request a few tiles at zoom level 4 to warm the cache
-      try {
-        const warmupPromises = [];
-        for (let x = 8; x <= 10; x++) {
-          for (let y = 5; y <= 7; y++) {
-            const tileUrl = tileUrlTemplate.replace('{z}', '4').replace('{x}', String(x)).replace('{y}', String(y));
-            warmupPromises.push(
-              fetch(tileUrl).catch(() => {}) // Ignore errors, just warm cache
-            );
-          }
+      // Generate all visible tile coordinates
+      for (let x = topLeft.x; x <= bottomRight.x; x++) {
+        for (let y = topLeft.y; y <= bottomRight.y; y++) {
+          visibleTiles.push({ x, y });
         }
-        await Promise.all(warmupPromises);
-      } catch (error) {
-        console.log('Cache warmup error:', error);
       }
 
-      completedSteps++;
-      setDownloadProgress(completedSteps / totalSteps);
+      console.log(`[Prefetch] Viewport: zoom=${zoom}, tiles in view: ${visibleTiles.length}, bounds: NE(${ne[0].toFixed(2)},${ne[1].toFixed(2)}) SW(${sw[0].toFixed(2)},${sw[1].toFixed(2)})`);
+
+      // Limit tiles to reasonable number (covers most viewports without long download)
+      const maxTilesPerTimestep = 16;
+      if (visibleTiles.length > maxTilesPerTimestep) {
+        const centerX = Math.floor((topLeft.x + bottomRight.x) / 2);
+        const centerY = Math.floor((topLeft.y + bottomRight.y) / 2);
+
+        visibleTiles.sort((a, b) => {
+          const distA = Math.abs(a.x - centerX) + Math.abs(a.y - centerY);
+          const distB = Math.abs(b.x - centerX) + Math.abs(b.y - centerY);
+          return distA - distB;
+        });
+
+        visibleTiles = visibleTiles.slice(0, maxTilesPerTimestep);
+      }
+    } else {
+      // Fallback: fetch a small region at zoom level 4 (Europe center)
+      const center = latLngToTile(50, 10, zoom);
+      for (let dx = -2; dx <= 2; dx++) {
+        for (let dy = -2; dy <= 2; dy++) {
+          visibleTiles.push({ x: center.x + dx, y: center.y + dy });
+        }
+      }
+    }
+
+    console.log(`[Prefetch] Fetching ${visibleTiles.length} tiles at zoom ${zoom}`);
+
+    const totalSteps = timesteps.length;
+    const BATCH_SIZE = 4; // Download 4 timesteps in parallel
+
+    // Download tiles in parallel batches
+    for (let i = 0; i < timesteps.length; i += BATCH_SIZE) {
+      const batch = timesteps.slice(i, i + BATCH_SIZE);
+      
+      const batchPromises = batch.map(step => {
+        const tileUrlTemplate = getTileUrl(step.timestamp, bandId);
+        cachedTileUrls.current.set(step.timestamp, tileUrlTemplate);
+
+        return visibleTiles.map(({ x, y }: { x: number, y: number }) => {
+          const tileUrl = tileUrlTemplate
+            .replace('{z}', String(zoom))
+            .replace('{x}', String(x))
+            .replace('{y}', String(y));
+          return fetch(tileUrl).catch(() => {});
+        });
+      });
+
+      // Flatten and run all in parallel
+      const allPromises = batchPromises.flat();
+      await Promise.all(allPromises);
+
+      setDownloadProgress(Math.min((i + BATCH_SIZE) / totalSteps, 1));
     }
 
     setIsDownloading(false);
@@ -276,7 +346,7 @@ export default function App() {
   // Handle play button press
   const handlePlayPress = useCallback(async () => {
     if (isPlaying) {
-      // Stop playback - clear cache and reset state
+      // Stop playback - clear state
       if (playInterval.current) {
         clearInterval(playInterval.current);
         playInterval.current = null;
@@ -286,21 +356,92 @@ export default function App() {
       // Clear cache when stopping - only show current frame
       cachedTileUrls.current.clear();
       setDownloadProgress(0);
+      setAnimationUrl(null);
       return;
     }
 
+    // Capture current map bounds and zoom before prefetching
+    let currentBounds = mapBounds;
+    let currentZoom = mapZoom;
+    if (mapRef.current) {
+      try {
+        const bounds = await mapRef.current?.getVisibleBounds();
+        if (bounds && bounds.length === 2) {
+          currentBounds = {
+            ne: [bounds[0][0], bounds[0][1]],
+            sw: [bounds[1][0], bounds[1][1]]
+          };
+        }
+        const zoom = await mapRef.current?.getZoom();
+        if (zoom !== undefined) {
+          // Use minimum zoom 6 to avoid downloading too many tiles when zoomed out
+          currentZoom = Math.max(Math.round(zoom), 6);
+        }
+      } catch (e) {
+        console.log('Could not get map bounds:', e);
+      }
+    }
+
+    // Calculate visible tile range
+    let minX = 0, maxX = 0, minY = 0, maxY = 0;
+    if (currentBounds) {
+      const { ne, sw } = currentBounds;
+      const topLeft = latLngToTile(ne[1], sw[0], currentZoom);
+      const bottomRight = latLngToTile(sw[1], ne[0], currentZoom);
+      minX = topLeft.x;
+      maxX = bottomRight.x;
+      minY = topLeft.y;
+      maxY = bottomRight.y;
+    } else {
+      // Fallback: Europe center
+      const center = latLngToTile(50, 10, currentZoom);
+      minX = center.x - 2;
+      maxX = center.x + 2;
+      minY = center.y - 2;
+      maxY = center.y + 2;
+    }
+
+    const tileCount = (maxX - minX + 1) * (maxY - minY + 1);
+    console.log(`[Play] Viewport: ${tileCount} tiles at zoom ${currentZoom}`);
+
+    // Use animation mode if viewport is reasonable (16 tiles or fewer)
+    if (tileCount <= 16 && timesteps.length > 0) {
+      const startTime = timesteps[0]?.timestamp;
+      const endTime = timesteps[timesteps.length - 1]?.timestamp;
+
+      if (startTime && endTime) {
+        console.log(`[Play] Using animated WebP mode: ${startTime} to ${endTime}`);
+        const animUrl = getAnimationUrl(
+          minX, maxX, minY, maxY,
+          currentZoom,
+          selectedBand.id,
+          startTime,
+          endTime,
+          10
+        );
+        setAnimationUrl(animUrl);
+        setIsPlaying(true);
+        return;
+      }
+    }
+
+    // Fall back to tile prefetch mode for larger viewports
+    // Clear cache before starting new download
+    cachedTileUrls.current.clear();
+
+    console.log(`[Play] Starting tile prefetch with zoom=${currentZoom}, bounds=${currentBounds ? `NE(${currentBounds.ne[0].toFixed(2)},${currentBounds.ne[1].toFixed(2)}) SW(${currentBounds.sw[0].toFixed(2)},${currentBounds.sw[1].toFixed(2)})` : 'null'}`);
+
     // Check if we need to download
-    const cacheKey = `${selectedChannel.id}_${timesteps[0]?.filenameTime}`;
-    const hasCache = cachedTileUrls.current.has(timesteps[0]?.filenameTime);
+    const hasCache = cachedTileUrls.current.has(timesteps[0]?.timestamp);
 
     if (!hasCache) {
       // Download tiles first
-      await prefetchTilesForChannel(selectedChannel.id);
+      await prefetchTilesForBand(selectedBand.id, currentZoom, currentBounds);
     }
 
     // Start playback
     setIsPlaying(true);
-    let currentIndex = timesteps.findIndex(s => s.filenameTime === selectedStep?.filenameTime);
+    let currentIndex = timesteps.findIndex(s => s.timestamp === selectedStep?.timestamp);
     if (currentIndex === -1) currentIndex = 0;
     pendingFrame.current = false; // Reset pending state
 
@@ -312,11 +453,11 @@ export default function App() {
       currentIndex = (currentIndex + 1) % timesteps.length;
       pendingFrame.current = true; // Mark that we're waiting for this frame
       setSelectedStep(timesteps[currentIndex]);
-    }, 2000);
+    }, 1000);
 
-  }, [isPlaying, selectedChannel.id, timesteps, selectedStep, prefetchTilesForChannel]);
+  }, [isPlaying, selectedBand.id, timesteps, selectedStep, prefetchTilesForBand]);
 
-  // Stop playback when channel changes
+  // Stop playback when band changes
   useEffect(() => {
     if (isPlaying) {
       if (playInterval.current) {
@@ -328,7 +469,7 @@ export default function App() {
       setDownloadProgress(0);
       cachedTileUrls.current.clear();
     }
-  }, [selectedChannel.id]);
+  }, [selectedBand.id]);
 
   // Search Logic
   const searchLocation = async (query: string) => {
@@ -420,7 +561,7 @@ export default function App() {
         if (longitude >= REGION.west && longitude <= REGION.east &&
             latitude >= REGION.south && latitude <= REGION.north) {
           setUserLocation([longitude, latitude]);
-          await fetchPointForecast(latitude, longitude, selectedChannel.id);
+          await fetchPointForecast(latitude, longitude, selectedBand.id);
         } else {
           alert('Your location is outside the forecast coverage area');
         }
@@ -432,7 +573,7 @@ export default function App() {
       if (showPointForecast) {
         setShowPointForecast(false);
       } else {
-        await fetchPointForecast(userLocation[1], userLocation[0], selectedChannel.id);
+        await fetchPointForecast(userLocation[1], userLocation[0], selectedBand.id);
       }
     }
   };
@@ -441,35 +582,39 @@ export default function App() {
   // Tiles are fetched automatically by MapLibre from the tile server
   const tileUrl = useMemo(() => {
     if (!selectedStep) return null;
-    // Add cache-busting t parameter based on filenameTime to force fresh tiles
-    const url = `${SERVER_URL}/tiles/{z}/{x}/{y}.png?url=${encodeURIComponent(
-      `${BASE_BUCKET_URL}/${selectedStep.dateFolder}/forecast_${selectedStep.filenameTime}_${selectedChannel.id}.tiff`
-    )}&channel=${selectedChannel.id}&t=${selectedStep.filenameTime}`;
-
+    const url = getTileUrl(selectedStep.timestamp, selectedBand.id);
     console.log('[TileDebug] Generated Tile URL Template:', url);
     return url;
-  }, [selectedStep, selectedChannel]);
+  }, [selectedStep, selectedBand]);
 
   // Update buffers for native double-buffering
   useEffect(() => {
     if (tileUrl && tileUrl !== lastProcessedUrl.current) {
       lastProcessedUrl.current = tileUrl;
-      // Update the buffer with new tile URL
-      setActiveLayerIndex(current => {
-        const nextIndex = current === 0 ? 1 : 0;
-        setBufferUrls(prev => {
-          const next = [...prev] as [string | null, string | null];
-          next[nextIndex] = tileUrl;
-          return next;
-        });
-        return nextIndex;
+      const frameTimestamp = Date.now();
+      currentLoadedTimestamp.current = frameTimestamp;
+      
+      // Update the buffer with new tile URL but don't switch active layer yet
+      // This prevents showing partial tiles
+      const nextIndex = activeLayerIndexRef.current === 0 ? 1 : 0;
+      setBufferUrls(prev => {
+        const next = [...prev] as [string | null, string | null];
+        next[nextIndex] = tileUrl;
+        return next;
       });
-      // Delay clearing pending state to give tiles time to render
+      
+      // Wait for tiles to load before switching to the new layer
+      // This ensures the full image appears at once instead of tiles loading progressively
+      const loadDelay = isPlaying ? 800 : 1500;
       setTimeout(() => {
-        pendingFrame.current = false;
-      }, 1500);
+        // Only switch if this is still the current frame (not superseded by another)
+        if (currentLoadedTimestamp.current === frameTimestamp) {
+          setActiveLayerIndex(nextIndex);
+          pendingFrame.current = false;
+        }
+      }, loadDelay);
     }
-  }, [tileUrl]);
+  }, [tileUrl, isPlaying]);
 
   return (
     <View style={styles.page}>
@@ -544,7 +689,7 @@ export default function App() {
       {showPointForecast && pointForecastData && currentTab === 'map' && (
         <View style={styles.pointForecastPanel}>
           <View style={styles.pointForecastHeader}>
-            <Text style={styles.pointForecastTitle}>{selectedChannel.label} Forecast</Text>
+            <Text style={styles.pointForecastTitle}>{selectedBand.label} Forecast</Text>
             <Text style={styles.pointForecastSubtitle}>
               {pointForecastData.coordinates.lat.toFixed(4)}°N, {pointForecastData.coordinates.lon.toFixed(4)}°E
             </Text>
@@ -590,80 +735,108 @@ export default function App() {
 
       {/* Map View */}
       {currentTab === 'map' && (
-        <MapLibreGL.MapView
-          style={styles.map}
-          mapStyle={CARTOLIGHT_STYLE}
-          logoEnabled={false}
-          attributionEnabled={true}
-        >
-          <MapLibreGL.Camera
-            ref={cameraRef}
-            defaultSettings={{
-              centerCoordinate: [(REGION.west + REGION.east) / 2, (REGION.north + REGION.south) / 2],
-              zoomLevel: 3
+        <>
+          <MapLibreGL.MapView
+            ref={mapRef}
+            style={styles.map}
+            mapStyle={CARTOLIGHT_STYLE}
+            logoEnabled={false}
+            attributionEnabled={true}
+            onRegionIsChanging={async (evt: any) => {
+              try {
+                const bounds = await mapRef.current?.getVisibleBounds();
+                if (bounds && bounds.length === 2) {
+                  setMapBounds({
+                    ne: [bounds[0][0], bounds[0][1]],
+                    sw: [bounds[1][0], bounds[1][1]]
+                  });
+                }
+                const props = evt.nativeEvent?.properties;
+                if (props?.zoom) {
+                  setMapZoom(Math.round(props.zoom));
+                }
+              } catch (e) {}
             }}
-            maxBounds={{
-              ne: [REGION.east, REGION.north],
-              sw: [REGION.west, REGION.south]
-            }}
-          />
+          >
+            <MapLibreGL.Camera
+              ref={cameraRef}
+              defaultSettings={{
+                centerCoordinate: [(REGION.west + REGION.east) / 2, (REGION.north + REGION.south) / 2],
+                zoomLevel: 3
+              }}
+              maxBounds={{
+                ne: [REGION.east, REGION.north],
+                sw: [REGION.west, REGION.south]
+              }}
+            />
 
-          {userLocationGeoJSON && (
-            <MapLibreGL.ShapeSource id="userLocationSource" shape={userLocationGeoJSON}>
-              <MapLibreGL.CircleLayer
-                id="userLocationCircle"
+            {userLocationGeoJSON && (
+              <MapLibreGL.ShapeSource id="userLocationSource" shape={userLocationGeoJSON}>
+                <MapLibreGL.CircleLayer
+                  id="userLocationCircle"
+                  style={{
+                    circleRadius: 6,
+                    circleColor: '#2dd4bf', // cyan/teal to match themed elements
+                    circleStrokeWidth: 2,
+                    circleStrokeColor: '#ffffff',
+                  }}
+                />
+              </MapLibreGL.ShapeSource>
+            )}
+
+            <MapLibreGL.ShapeSource id="regionSource" shape={regionGeoJSON}>
+              <MapLibreGL.LineLayer
+                id="regionBoundary"
                 style={{
-                  circleRadius: 6,
-                  circleColor: '#2dd4bf', // cyan/teal to match themed elements
-                  circleStrokeWidth: 2,
-                  circleStrokeColor: '#ffffff',
+                  lineColor: '#000000',
+                  lineWidth: 2,
+                  lineDasharray: [4, 4],
                 }}
               />
             </MapLibreGL.ShapeSource>
+
+            {/* Overlay Layers - Double Buffering for Smooth Playback */}
+            {[0, 1].map((idx) => {
+              const isActive = activeLayerIndex === idx;
+              const url = bufferUrls[idx];
+              if (!url) return null;
+
+              return (
+                <MapLibreGL.RasterSource
+                  key={`forecast-source-${idx}-${selectedBand.id}-${url.slice(-50)}`}
+                  id={`forecast-source-${idx}`}
+                  tileUrlTemplates={[url]}
+                  tileSize={256}
+                >
+                  <MapLibreGL.RasterLayer
+                    id={`forecast-layer-${idx}`}
+                    style={{
+                      rasterOpacity: isActive ? 0.8 : 0,
+                      rasterFadeDuration: 0, // No fade - instant switch when active
+                    }}
+                  />
+                </MapLibreGL.RasterSource>
+              );
+            })}
+          </MapLibreGL.MapView>
+
+          {/* Animated WebP Overlay - Full screen on top of map */}
+          {animationUrl && (
+            <View style={StyleSheet.absoluteFill} pointerEvents="none">
+              <Image
+                source={{ uri: animationUrl }}
+                style={{ width: '100%', height: '100%', resizeMode: 'cover' }}
+              />
+            </View>
           )}
-
-          <MapLibreGL.ShapeSource id="regionSource" shape={regionGeoJSON}>
-            <MapLibreGL.LineLayer
-              id="regionBoundary"
-              style={{
-                lineColor: '#ffffff',
-                lineWidth: 2,
-                lineOpacity: 0.6,
-              }}
-            />
-          </MapLibreGL.ShapeSource>
-
-          {/* Overlay Layers - Double Buffering for Smooth Playback */}
-          {[0, 1].map((idx) => {
-            const isActive = activeLayerIndex === idx;
-            const url = bufferUrls[idx];
-            if (!url) return null;
-
-            return (
-              <MapLibreGL.RasterSource
-                key={`forecast-source-${idx}-${selectedChannel.id}-${url.slice(-50)}`}
-                id={`forecast-source-${idx}`}
-                tileUrlTemplates={[url]}
-                tileSize={256}
-              >
-                <MapLibreGL.RasterLayer
-                  id={`forecast-layer-${idx}`}
-                  style={{
-                    rasterOpacity: isActive ? 0.8 : 0,
-                    rasterFadeDuration: 500,
-                  }}
-                />
-              </MapLibreGL.RasterSource>
-            );
-          })}
-        </MapLibreGL.MapView>
+        </>
       )}
 
       {/* Local View */}
       {currentTab === 'local' && (
         <View style={styles.localView}>
           <View style={styles.localHeader}>
-            <Text style={styles.localTitle}>{selectedChannel.label} Local Forecast</Text>
+            <Text style={styles.localTitle}>{selectedBand.label} Local Forecast</Text>
             <Text style={styles.localSubtitle}>
               {userLocation ? `${userLocation[1].toFixed(4)}°N, ${userLocation[0].toFixed(4)}°E` : 'Location not set'}
             </Text>
@@ -731,14 +904,14 @@ export default function App() {
             size={40}
           />
           <View style={styles.channelRow}>
-            {CHANNELS.map((ch) => (
+            {BANDS.map((band) => (
               <TouchableOpacity
-                key={ch.id}
-                onPress={() => setSelectedChannel(ch)}
-                style={[styles.channelBtn, selectedChannel.id === ch.id && styles.selectedBtn]}
+                key={band.id}
+                onPress={() => setSelectedBand(band)}
+                style={[styles.channelBtn, selectedBand.id === band.id && styles.selectedBtn]}
               >
-                <Text style={[styles.btnText, selectedChannel.id === ch.id && styles.selectedBtnText]}>
-                  {ch.label}
+                <Text style={[styles.btnText, selectedBand.id === band.id && styles.selectedBtnText]}>
+                  {band.label}
                 </Text>
               </TouchableOpacity>
             ))}
@@ -761,7 +934,7 @@ export default function App() {
               </View>
               <RainbowSlider
                 data={timesteps}
-                value={timesteps.findIndex(s => s.filenameTime === selectedStep?.filenameTime)}
+                value={timesteps.findIndex(s => s.timestamp === selectedStep?.timestamp)}
                 onChange={(index) => setSelectedStep(timesteps[Math.round(index)])}
                 forecastValues={pointForecastData?.timesteps.slice(-18).reverse().map((s: any) => s.value)}
               />

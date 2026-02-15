@@ -323,7 +323,7 @@ async def check_timestamp(timestamp: str):
 
 
 @app.get("/tiles/{z}/{x}/{y}.png")
-async def get_tile(
+async def get_tile_png(
     z: int,
     x: int,
     y: int,
@@ -334,108 +334,217 @@ async def get_tile(
     Get a PNG tile for the specified band and time.
     Uses COG internal overviews for optimal performance.
     """
-    if band not in BANDS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid band: {band}. Available: {list(BANDS.keys())}"
-        )
-
-    config = BANDS[band]
-
-    try:
-        url = get_cog_url(time, band)
-    except Exception as e:
-        # Signed URL generation failed - return transparent tile
-        logger.error(f"Failed to generate signed URL for tile {z}/{x}/{y} band={band} time={time}: {e}")
-        from io import BytesIO
-        from PIL import Image
+    from io import BytesIO
+    from PIL import Image
+    
+    rgba = generate_tile_rgba(x, y, z, band, time)
+    
+    if rgba is None:
         img = Image.new('RGBA', (256, 256), (0, 0, 0, 0))
         buffer = BytesIO()
         img.save(buffer, format='PNG')
         return Response(content=buffer.getvalue(), media_type="image/png")
+    
+    img = Image.fromarray(rgba, mode='RGBA')
+    buffer = BytesIO()
+    img.save(buffer, format='PNG', optimize=True)
+    return Response(content=buffer.getvalue(), media_type="image/png")
 
+
+@app.get("/tiles/{z}/{x}/{y}.webp")
+async def get_tile_webp(
+    z: int,
+    x: int,
+    y: int,
+    band: str = Query(..., description="Band: lightning, sat_ch0, sat_ch1, ..."),
+    time: str = Query(..., description="Timestamp: YYYYMMDDHHMM")
+):
+    """
+    Get a WebP tile for the specified band and time.
+    Uses COG internal overviews for optimal performance.
+    """
+    from io import BytesIO
+    from PIL import Image
+    
+    rgba = generate_tile_rgba(x, y, z, band, time)
+    
+    if rgba is None:
+        img = Image.new('RGBA', (256, 256), (0, 0, 0, 0))
+        buffer = BytesIO()
+        img.save(buffer, format='WEBP', quality=85, method=6)
+        return Response(content=buffer.getvalue(), media_type="image/webp")
+    
+    img = Image.fromarray(rgba, mode='RGBA')
+    buffer = BytesIO()
+    img.save(buffer, format='WEBP', quality=85, method=6)
+    return Response(content=buffer.getvalue(), media_type="image/webp")
+
+
+def generate_tile_rgba(x: int, y: int, z: int, band: str, time: str) -> Optional[np.ndarray]:
+    """Generate RGBA array for a single tile. Returns None on error."""
+    if band not in BANDS:
+        return None
+    
+    config = BANDS[band]
+    
     try:
-        # Use COGReader - reads directly from GCS with HTTP range requests
-        # COG internal overviews are used automatically for low zoom levels
+        url = get_cog_url(time, band)
+    except Exception as e:
+        logger.error(f"Failed to generate signed URL for tile {z}/{x}/{y} band={band} time={time}: {e}")
+        return None
+    
+    try:
         with COGReader(url) as cog:
-            # Read tile - COG handles overview selection automatically
             tile = cog.tile(x, y, z, tilesize=256, indexes=(1,))
             data = tile.data[0].astype(np.float32)
-
-            # Get nodata value from COG for fallback handling
+            
             nodata_value = cog.nodata if hasattr(cog, 'nodata') else None
-
-            # Create nodata mask BEFORE rescaling (handles NaN and explicit nodata)
+            
             nodata_mask = None
             if nodata_value is not None:
                 nodata_mask = (data == nodata_value) | (~np.isfinite(data))
             elif tile.mask is not None:
                 nodata_mask = ~tile.mask.astype(bool)
             elif np.any(~np.isfinite(data)):
-                # Fallback: treat any non-finite values as nodata
                 nodata_mask = ~np.isfinite(data)
-
-            # Apply rescaling
+            
             data = np.clip(data, config.min, config.max)
             data = ((data - config.min) / (config.max - config.min) * 255).astype(np.uint8)
-
-            # Apply colormap
+            
             if band == "lightning":
                 rgba = np.zeros((256, 256, 4), dtype=np.uint8)
-
+                
                 non_zero_mask = data > 0
                 rgba[non_zero_mask] = [255, 255, 0, 150]
-
+                
                 for val, color in LIGHTNING_CMAP.items():
                     if val > 0:
                         mask = data >= int(val * 255 / config.max)
                         rgba[mask] = color
-
+                
                 if nodata_mask is not None:
                     rgba[nodata_mask] = [0, 0, 0, 0]
-
             else:
-                # Matplotlib colormap for satellite
                 from matplotlib import cm
-
+                
                 cmap = cm.get_cmap(config.colormap)
                 if config.invert:
                     cmap = cmap.reversed()
-
-                # Normalize data to 0-1 range for colormap
+                
                 normalized = data.astype(float) / 255.0
                 rgba = (cmap(normalized) * 255).astype(np.uint8)
-                rgba[:, :, 3] = 255  # Make fully opaque
-
-                # Set lowest values (0) to transparent (nodata/no signal)
+                rgba[:, :, 3] = 255
+                
                 zero_mask = data == 0
                 rgba[zero_mask] = [0, 0, 0, 0]
-
-                # Handle nodata - set transparent
+                
                 if nodata_mask is not None:
                     rgba[nodata_mask] = [0, 0, 0, 0]
-
-            # Convert to PNG
-            from io import BytesIO
-            from PIL import Image
-
-            img = Image.fromarray(rgba, mode='RGBA')
-            buffer = BytesIO()
-            img.save(buffer, format='PNG', optimize=True)
-
-            return Response(content=buffer.getvalue(), media_type="image/png")
-
+            
+            return rgba
+            
     except Exception as e:
-        # Return transparent tile on error
-        logger.error(f"Error generating tile {z}/{x}/{y} band={band} time={time}: {e}", exc_info=True)
-        from io import BytesIO
+        logger.error(f"Error generating tile {z}/{x}/{y} band={band} time={time}: {e}")
+        return None
+
+
+@app.get("/animation.webp")
+async def get_animation(
+    min_x: int = Query(..., description="Min tile X"),
+    max_x: int = Query(..., description="Max tile X"),
+    min_y: int = Query(..., description="Min tile Y"),
+    max_y: int = Query(..., description="Max tile Y"),
+    zoom: int = Query(..., description="Zoom level"),
+    band: str = Query(..., description="Band: lightning, sat_ch0, ..."),
+    start_time: str = Query(..., description="Start timestamp: YYYYMMDDHHMM"),
+    end_time: str = Query(..., description="End timestamp: YYYYMMDDHHMM"),
+    step_minutes: int = Query(10, description="Time step in minutes")
+):
+    """
+    Generate an animated WebP for the specified tile range and time range.
+    Returns a single animated WebP image with all frames.
+    """
+    if band not in BANDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid band: {band}. Available: {list(BANDS.keys())}"
+        )
+    
+    # Parse timestamps and generate time list
+    try:
+        start_dt = datetime.strptime(start_time, "%Y%m%d%H%M")
+        end_dt = datetime.strptime(end_time, "%Y%m%d%H%M")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid timestamp format. Use YYYYMMDDHHMM")
+    
+    # Generate list of timestamps
+    timestamps = []
+    current = start_dt
+    while current <= end_dt:
+        timestamps.append(current.strftime("%Y%m%d%H%M"))
+        current += timedelta(minutes=step_minutes)
+    
+    if not timestamps:
+        raise HTTPException(status_code=400, detail="No timestamps in range")
+    
+    # Limit frames to prevent huge downloads
+    max_frames = 30
+    if len(timestamps) > max_frames:
+        logger.warning(f"Limiting animation from {len(timestamps)} to {max_frames} frames")
+        timestamps = timestamps[:max_frames]
+    
+    logger.info(f"Generating animated WebP: {len(timestamps)} frames, tiles ({min_x}-{max_x}, {min_y}-{max_y}), zoom={zoom}")
+    
+    # Calculate total size
+    tile_width = max_x - min_x + 1
+    tile_height = max_y - min_y + 1
+    frame_width = tile_width * 256
+    frame_height = tile_height * 256
+    
+    # Generate all frames
+    frames = []
+    for i, timestamp in enumerate(timestamps):
+        # Create blank frame
+        frame = np.zeros((frame_height, frame_width, 4), dtype=np.uint8)
+        
+        # Fill each tile in the grid
+        for ty in range(min_y, max_y + 1):
+            for tx in range(min_x, max_x + 1):
+                rgba = generate_tile_rgba(tx, ty, zoom, band, timestamp)
+                if rgba is not None:
+                    # Copy tile into frame
+                    tile_offset_y = (ty - min_y) * 256
+                    tile_offset_x = (tx - min_x) * 256
+                    frame[tile_offset_y:tile_offset_y+256, tile_offset_x:tile_offset_x+256] = rgba
+        
+        # Convert to PIL Image
         from PIL import Image
-
-        img = Image.new('RGBA', (256, 256), (0, 0, 0, 0))
-        buffer = BytesIO()
-        img.save(buffer, format='PNG')
-
-        return Response(content=buffer.getvalue(), media_type="image/png")
+        img = Image.fromarray(frame, mode='RGBA')
+        frames.append(img)
+    
+    # Save as animated WebP
+    from io import BytesIO
+    buffer = BytesIO()
+    
+    # Save first frame with duration for animation
+    # WebP animation: duration is in milliseconds per frame
+    frame_duration = 200  # 200ms per frame = 5 fps
+    
+    frames[0].save(
+        buffer,
+        format='WEBP',
+        save_all=True,
+        append_images=frames[1:],
+        duration=frame_duration,
+        loop=0,  # 0 = infinite loop
+        quality=85,
+        method=4
+    )
+    
+    buffer.seek(0)
+    logger.info(f"Generated animated WebP: {len(frames)} frames, {buffer.tell()} bytes")
+    
+    return Response(content=buffer.getvalue(), media_type="image/webp")
 
 
 @app.get("/tilejson")

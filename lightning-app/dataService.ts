@@ -7,13 +7,17 @@ export const REGION = {
 };
 
 // Lightning Server V2 - Cloud Run deployment
-export const SERVER_URL = "https://lightning-server-v2-935480850831.europe-west3.run.app";
+// Use localhost:3001 for local development
+const USE_LOCAL = false; // Set to true for local development
+export const SERVER_URL = USE_LOCAL 
+  ? "http://127.0.0.1:3001" 
+  : "https://lightning-server-v2-935480850831.europe-west3.run.app";
 
 // Bands available in the new backend
 export const BANDS = [
   { id: 'lightning', label: 'Lightning' },
-  { id: 'sat_ch0', label: 'VIS (Ch0)' },
-  { id: 'sat_ch1', label: 'IR (Ch1)' },
+  // { id: 'sat_ch0', label: 'VIS (Ch0)' },
+  // { id: 'sat_ch1', label: 'IR (Ch1)' },
 ];
 
 // Keep CHANNELS as alias for backward compatibility
@@ -92,6 +96,26 @@ export const scanAvailableTimesteps = async (maxTimesteps: number = 18): Promise
 // Generate tile URL for the new backend
 export const getTileUrl = (timestamp: string, band: string): string => {
   return `${SERVER_URL}/tiles/{z}/{x}/{y}.png?band=${band}&time=${timestamp}`;
+};
+
+// Generate WebP tile URL (optimized)
+export const getTileUrlWebP = (timestamp: string, band: string): string => {
+  return `${SERVER_URL}/tiles/{z}/{x}/{y}.webp?band=${band}&time=${timestamp}`;
+};
+
+// Generate animated WebP URL for the viewport
+export const getAnimationUrl = (
+  minX: number,
+  maxX: number,
+  minY: number,
+  maxY: number,
+  zoom: number,
+  band: string,
+  startTime: string,
+  endTime: string,
+  stepMinutes: number = 10
+): string => {
+  return `${SERVER_URL}/animation.webp?min_x=${minX}&max_x=${maxX}&min_y=${minY}&max_y=${maxY}&zoom=${zoom}&band=${band}&start_time=${startTime}&end_time=${endTime}&step_minutes=${stepMinutes}`;
 };
 
 // Fetch bounds for a specific band and time
