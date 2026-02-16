@@ -1,6 +1,11 @@
 import React, { useEffect, useRef, useState, useMemo, useCallback } from 'react';
 import { Platform, View, Text, TouchableOpacity, TextInput, Animated, Dimensions, Easing, Image, ScrollView } from 'react-native';
-import 'maplibre-gl/dist/maplibre-gl.css';
+import 'mapbox-gl/dist/mapbox-gl.css';
+import mapboxgl from 'mapbox-gl';
+
+// Get free token at https://account.mapbox.com/
+mapboxgl.accessToken = 'pk.eyJ1IjoiYWRyaWVuYnVmb3J0IiwiYSI6ImNta283bDZvYzA0MHMzZXFyMWZ2Nm8yazAifQ.X0pxUQsHOyd4INio6_BiKA';
+
 import { webStyles } from './styles';
 import PlayButton from './components/PlayButton';
 import ThunderLegend from './components/ThunderLegend';
@@ -14,7 +19,7 @@ import {
   fetchPointForecast,
 } from './dataService';
 
-const CARTOLIGHT_STYLE = 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json';
+const MAPBOX_DARK_STYLE = 'mapbox://styles/mapbox/dark-v11';
 
 const MapIcon = ({ active }: { active: boolean }) => (
   <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke={active ? "#fff" : "#666"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -125,10 +130,10 @@ export default function App() {
 
   useEffect(() => {
     if (Platform.OS === 'web' && mapRef.current) {
-      import('maplibre-gl').then(({ Map, NavigationControl }) => {
+      import('mapbox-gl').then(({ Map, NavigationControl }) => {
         const map = new Map({
           container: mapRef.current,
-          style: CARTOLIGHT_STYLE,
+          style: MAPBOX_DARK_STYLE,
           center: [(REGION.west + REGION.east) / 2, (REGION.north + REGION.south) / 2],
           zoom: 3,
           maxBounds: [[REGION.west, REGION.south], [REGION.east, REGION.north]]
@@ -138,26 +143,14 @@ export default function App() {
         map.addControl(new NavigationControl());
 
         map.on('load', () => {
-          [0, 1].forEach(idx => {
-            map.addSource(`forecast-source-${idx}`, {
-              type: 'raster',
-              tiles: [''],
-              tileSize: 256,
-              attribution: 'FlashNet'
-            });
-
-            map.addLayer({
-              id: `forecast-layer-${idx}`,
-              type: 'raster',
-              source: `forecast-source-${idx}`,
-              paint: {
-                'raster-opacity': 0,
-                'raster-fade-duration': 0
-              }
-            });
-          });
-
-          updateMapLayer();
+          // Don't add sources yet - wait for data to be loaded
+          // Sources will be added dynamically in updateMapLayer when data is available
+          console.log('[Web] Map loaded, waiting for timesteps...');
+          
+          // Only call updateMapLayer if we have data
+          if (timesteps.length > 0 && selectedStep) {
+            updateMapLayer();
+          }
 
           if (navigator.geolocation) {
             navigator.geolocation.getCurrentPosition(
@@ -212,6 +205,17 @@ export default function App() {
     };
     initTimesteps();
   }, []);
+
+  // Update map when timesteps are loaded
+  useEffect(() => {
+    if (timesteps.length > 0 && selectedStep && mapInstance.current) {
+      console.log('[Web] Timesteps loaded, triggering map update');
+      // Small delay to ensure map is ready
+      setTimeout(() => {
+        updateMapLayer();
+      }, 500);
+    }
+  }, [timesteps, selectedStep]);
 
   const prefetchTilesForBand = useCallback(async (bandId: string) => {
     if (timesteps.length === 0) return;
@@ -469,17 +473,81 @@ export default function App() {
     setIsLoading(true);
     try {
       const tileUrlTemplate = getTileUrl(selectedStep.timestamp, selectedBand.id);
+      console.log('[Web] Updating map layer with URL:', tileUrlTemplate);
 
-      const source: any = map.getSource(currentSourceId);
-      if (source) {
+      let source: any = map.getSource(currentSourceId);
+      
+      // If source doesn't exist or tiles array is empty, recreate the source
+      if (!source || !source.setTiles) {
+        // Remove old source and layer if they exist
+        if (map.getLayer(currentLayerId)) {
+          map.removeLayer(currentLayerId);
+        }
+        if (map.getSource(currentSourceId)) {
+          map.removeSource(currentSourceId);
+        }
+        
+        // Add new source with proper tiles
+        console.log('[Web] Adding source with tiles:', [tileUrlTemplate]);
+        map.addSource(currentSourceId, {
+          type: 'raster',
+          tiles: [tileUrlTemplate],
+          tileSize: 256,
+          attribution: 'FlashNet'
+        });
+        
+        map.addLayer({
+          id: currentLayerId,
+          type: 'raster',
+          source: currentSourceId,
+          paint: {
+            'raster-opacity': 0,
+            'raster-fade-duration': 0
+          }
+        });
+        
+        // Also ensure the other layer exists
+        const otherLayerId = `forecast-layer-${activeLayerIndex}`;
+        const otherSourceId = `forecast-source-${activeLayerIndex}`;
+        if (!map.getSource(otherSourceId)) {
+          map.addSource(otherSourceId, {
+            type: 'raster',
+            tiles: [tileUrlTemplate],
+            tileSize: 256,
+            attribution: 'FlashNet'
+          });
+        }
+        if (!map.getLayer(otherLayerId)) {
+          map.addLayer({
+            id: otherLayerId,
+            type: 'raster',
+            source: otherSourceId,
+            paint: {
+              'raster-opacity': 0,
+              'raster-fade-duration': 0
+            }
+          });
+        }
+        
+        source = map.getSource(currentSourceId);
+        console.log('[Web] Source added, type:', source?.type, 'tiles:', source?.tiles);
+      } else if (source && tileUrlTemplate) {
+        console.log('[Web] Setting tiles on existing source:', [tileUrlTemplate]);
         source.setTiles([tileUrlTemplate]);
+      }
 
+      if (source && tileUrlTemplate) {
         const onSourceData = (e: any) => {
           if (e.sourceId === currentSourceId && e.isSourceLoaded) {
             map.off('sourcedata', onSourceData);
 
-            map.setPaintProperty(oldLayerId, 'raster-opacity', 0);
-            map.setPaintProperty(currentLayerId, 'raster-opacity', 0.8);
+            // Only style layers if they exist
+            if (map.getLayer(oldLayerId)) {
+              map.setPaintProperty(oldLayerId, 'raster-opacity', 0);
+            }
+            if (map.getLayer(currentLayerId)) {
+              map.setPaintProperty(currentLayerId, 'raster-opacity', 0.8);
+            }
             setActiveLayerIndex(nextIndex);
             setIsLoading(false);
           }
@@ -487,8 +555,12 @@ export default function App() {
 
         const timeout = setTimeout(() => {
           map.off('sourcedata', onSourceData);
-          map.setPaintProperty(oldLayerId, 'raster-opacity', 0);
-          map.setPaintProperty(currentLayerId, 'raster-opacity', 0.8);
+          if (map.getLayer(oldLayerId)) {
+            map.setPaintProperty(oldLayerId, 'raster-opacity', 0);
+          }
+          if (map.getLayer(currentLayerId)) {
+            map.setPaintProperty(currentLayerId, 'raster-opacity', 0.8);
+          }
           setActiveLayerIndex(nextIndex);
           setIsLoading(false);
         }, 3000);
@@ -641,6 +713,13 @@ export default function App() {
       <View style={webStyles.controlsContainer}>
         <View style={webStyles.controlsRow}>
             <View style={webStyles.channelRow}>
+              <PlayButton
+                isPlaying={isPlaying}
+                isDownloading={isDownloading}
+                progress={downloadProgress}
+                onPress={handlePlayPress}
+                size={40}
+              />
               {BANDS.map((band) => (
                 <TouchableOpacity
                   key={band.id}
@@ -653,16 +732,6 @@ export default function App() {
                 </TouchableOpacity>
               ))}
             </View>
-        </View>
-
-        <View style={webStyles.playButtonRow}>
-          <PlayButton
-            isPlaying={isPlaying}
-            isDownloading={isDownloading}
-            progress={downloadProgress}
-            onPress={handlePlayPress}
-            size={50}
-          />
         </View>
 
         <View style={webStyles.timelineContainer}>
