@@ -834,13 +834,17 @@ async def get_preview(
         with COGReader(url) as cog:
             logger.debug(f"Opened COG: bounds={cog.bounds}, crs={cog.crs}")
             bounds = cog.bounds
+            
+            if isinstance(bounds, tuple):
+                minx, miny, maxx, maxy = bounds
+            else:
+                minx, miny, maxx, maxy = bounds.left, bounds.bottom, bounds.right, bounds.top
+            
             if cog.crs and str(cog.crs) != "EPSG:4326":
                 minx, miny, maxx, maxy = transform_bounds(
                     str(cog.crs), "EPSG:4326",
-                    bounds.left, bounds.bottom, bounds.right, bounds.top
+                    minx, miny, maxx, maxy
                 )
-            else:
-                minx, miny, maxx, maxy = bounds.left, bounds.bottom, bounds.right, bounds.top
             
             import math
             if any(not math.isfinite(v) for v in [minx, miny, maxx, maxy]):
