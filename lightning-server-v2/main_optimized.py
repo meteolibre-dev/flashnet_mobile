@@ -790,10 +790,126 @@ async def get_point_forecast(
     }
 
 
-@app.get("/health")
-async def health_check():
-    """Health check."""
-    return {"status": "healthy", "version": "2.0.0"}
+@app.get("/preview")
+async def get_preview(
+    band: str = Query(..., description="Band: lightning, sat_ch0, sat_ch1, ..."),
+    time: str = Query(..., description="Timestamp: YYYYMMDDHHMM"),
+    width: int = Query(1024, ge=256, le=4096, description="Output image width"),
+    height: int = Query(1024, ge=256, le=4096, description="Output image height")
+):
+    """
+    Generate a full PNG preview image for the specified band and time.
+    Covers the full geographic extent of the COG.
+    Useful for MapLibre image source animations.
+    """
+    from io import BytesIO
+    from PIL import Image as PILImage
+    
+    if band not in BANDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid band: {band}. Available: {list(BANDS.keys())}"
+        )
+    
+    config = BANDS[band]
+    
+    try:
+        url = get_cog_url(time, band)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate URL: {str(e)}")
+    
+    try:
+        with COGReader(url) as cog:
+            bounds = cog.bounds
+            if cog.crs and str(cog.crs) != "EPSG:4326":
+                minx, miny, maxx, maxy = transform_bounds(
+                    str(cog.crs), "EPSG:4326",
+                    bounds.left, bounds.bottom, bounds.right, bounds.top
+                )
+            else:
+                minx, miny, maxx, maxy = bounds.left, bounds.bottom, bounds.right, bounds.top
+            
+            import math
+            if any(not math.isfinite(v) for v in [minx, miny, maxx, maxy]):
+                minx, miny, maxx, maxy = -10.0, 33.0, 33.0, 65.0
+            
+            overview_level = 0
+            if width > 2048 or height > 2048:
+                overview_level = min(len(cog.overviews(1)) - 1, 2) if hasattr(cog, 'overviews') else 0
+            
+            img = cog.preview(
+                width=min(width, 2048),
+                height=min(height, 2048),
+                indexes=(1,),
+                overview_level=overview_level
+            )
+            
+            data = img.data[0].astype(np.float32)
+            
+            nodata_mask = None
+            if cog.nodata is not None:
+                nodata_mask = (data == cog.nodata) | (~np.isfinite(data))
+            elif np.any(~np.isfinite(data)):
+                nodata_mask = ~np.isfinite(data)
+            
+            data = np.clip(data, config.min, config.max)
+            data = ((data - config.min) / (config.max - config.min) * 255).astype(np.uint8)
+            
+            if band == "lightning":
+                rgba = np.zeros((data.shape[0], data.shape[1], 4), dtype=np.uint8)
+                
+                for val, color in LIGHTNING_CMAP.items():
+                    if val > 0:
+                        mask = data >= int(val * 255 / config.max)
+                        rgba[mask] = color
+                
+                non_zero_mask = data > 0
+                rgba[non_zero_mask & (rgba[:, :, 3] == 0)] = [255, 255, 0, 150]
+                
+                if nodata_mask is not None:
+                    rgba[nodata_mask] = [0, 0, 0, 0]
+            else:
+                from matplotlib import cm
+                
+                cmap = cm.get_cmap(config.colormap)
+                if config.invert:
+                    cmap = cmap.reversed()
+                
+                if data.shape != (height, width):
+                    pil_data = PILImage.fromarray(data)
+                    pil_data = pil_data.resize((width, height), PILImage.Resampling.BILINEAR)
+                    data = np.array(pil_data)
+                
+                normalized = data.astype(float) / 255.0
+                rgba = (cmap(normalized) * 255).astype(np.uint8)
+                rgba[:, :, 3] = 255
+                
+                zero_mask = data == 0
+                rgba[zero_mask] = [0, 0, 0, 0]
+                
+                if nodata_mask is not None:
+                    if nodata_mask.shape != (height, width):
+                        mask_img = PILImage.fromarray(nodata_mask.astype(np.uint8) * 255)
+                        mask_img = mask_img.resize((width, height), PILImage.Resampling.NEAREST)
+                        nodata_mask = np.array(mask_img) > 127
+                    rgba[nodata_mask] = [0, 0, 0, 0]
+            
+            pil_img = PILImage.fromarray(rgba, mode='RGBA')
+            
+            if pil_img.size != (width, height):
+                pil_img = pil_img.resize((width, height), PILImage.Resampling.BILINEAR)
+            
+            buffer = BytesIO()
+            pil_img.save(buffer, format='PNG', optimize=False)
+            buffer.seek(0)
+            
+            return Response(content=buffer.getvalue(), media_type="image/png")
+    
+    except rasterio.errors.RasterioIOError as e:
+        raise HTTPException(status_code=404, detail=f"COG file not found: {str(e)}")
+    except Exception as e:
+        logger.error(f"Error generating preview: {e}")
+        raise HTTPException(status_code=500, detail=f"Error generating preview: {str(e)}")
 
 
 if __name__ == "__main__":
