@@ -9,6 +9,13 @@ import os
 import re
 import logging
 from typing import Dict, Optional, Set
+
+logger = logging.getLogger(__name__)
+
+if os.getenv("DEBUG"):
+    logging.basicConfig(level=logging.DEBUG)
+else:
+    logging.basicConfig(level=logging.INFO)
 from datetime import datetime, timedelta
 from functools import lru_cache
 
@@ -805,7 +812,10 @@ async def get_preview(
     from io import BytesIO
     from PIL import Image as PILImage
     
+    logger.info(f"/preview request: band={band}, time={time}, width={width}, height={height}")
+    
     if band not in BANDS:
+        logger.error(f"Invalid band requested: {band}")
         raise HTTPException(
             status_code=400,
             detail=f"Invalid band: {band}. Available: {list(BANDS.keys())}"
@@ -815,11 +825,14 @@ async def get_preview(
     
     try:
         url = get_cog_url(time, band)
+        logger.debug(f"Generated URL: {url}")
     except Exception as e:
+        logger.error(f"Failed to generate URL: {time}/{band} - {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to generate URL: {str(e)}")
     
     try:
         with COGReader(url) as cog:
+            logger.debug(f"Opened COG: bounds={cog.bounds}, crs={cog.crs}")
             bounds = cog.bounds
             if cog.crs and str(cog.crs) != "EPSG:4326":
                 minx, miny, maxx, maxy = transform_bounds(
@@ -906,9 +919,10 @@ async def get_preview(
             return Response(content=buffer.getvalue(), media_type="image/png")
     
     except rasterio.errors.RasterioIOError as e:
+        logger.error(f"COG file not found: {time}/{band} - {str(e)}", exc_info=True)
         raise HTTPException(status_code=404, detail=f"COG file not found: {str(e)}")
     except Exception as e:
-        logger.error(f"Error generating preview: {e}")
+        logger.error(f"Error generating preview: band={band}, time={time} - {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error generating preview: {str(e)}")
 
 
