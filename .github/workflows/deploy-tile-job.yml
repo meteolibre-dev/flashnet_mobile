@@ -1,0 +1,107 @@
+name: Deploy Tile Job
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'tile_job/**'
+      - '.github/workflows/deploy-tile-job.yml'
+  workflow_dispatch:
+    inputs:
+      timestamp:
+        description: 'Specific timestamp (YYYYMMDDHHMM) to process'
+        required: false
+        type: string
+
+env:
+  PROJECT_ID: meteoforecast
+  GAR_LOCATION: europe-west3
+  JOB_NAME: tile-generator
+  REPOSITORY: flashnet-repo
+  IMAGE_NAME: tile-job
+  CONTEXT_DIR: tile_job
+
+jobs:
+  build-and-deploy:
+    name: Build and Deploy Cloud Run Job
+    runs-on: ubuntu-latest
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Google Auth
+        id: auth
+        uses: 'google-github-actions/auth@v2'
+        with:
+          credentials_json: '${{ secrets.GCP_CREDENTIALS }}'
+
+      - name: 'Set up Cloud SDK'
+        uses: 'google-github-actions/setup-gcloud@v2'
+
+      - name: 'Docker Auth'
+        run: 'gcloud auth configure-docker ${{ env.GAR_LOCATION }}-docker.pkg.dev --quiet'
+
+      - name: Get Short Git SHA
+        id: git-sha
+        run: echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: 'Build and Push Container Image'
+        run: |
+          docker build \
+            -f ${{ env.CONTEXT_DIR }}/Dockerfile \
+            --tag ${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:${{ steps.git-sha.outputs.SHORT_SHA }} \
+            --tag ${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:latest \
+            ${{ env.CONTEXT_DIR }}
+
+          docker push ${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:${{ steps.git-sha.outputs.SHORT_SHA }}
+          docker push ${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:latest
+
+      - name: 'Deploy or Update Cloud Run Job'
+        run: |
+          IMAGE_URL="${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:${{ steps.git-sha.outputs.SHORT_SHA }}"
+          
+          if gcloud run jobs describe ${{ env.JOB_NAME }} --region ${{ env.GAR_LOCATION }} --project ${{ env.PROJECT_ID }} 2>/dev/null; then
+            echo "Updating existing job..."
+            gcloud run jobs update job ${{ env.JOB_NAME }} \
+              --image "$IMAGE_URL" \
+              --region ${{ env.GAR_LOCATION }} \
+              --project ${{ env.PROJECT_ID }} \
+              --memory 2Gi \
+              --cpu 2 \
+              --max-retries 0 \
+              --task-timeout 3600s \
+              --set-env-vars TILES_BUCKET=inference_result,BUCKET_BASE_URL=gs://inference_result/forecasts,TILES_PREFIX=tiles
+          else
+            echo "Creating new job..."
+            gcloud run jobs create job ${{ env.JOB_NAME }} \
+              --image "$IMAGE_URL" \
+              --region ${{ env.GAR_LOCATION }} \
+              --project ${{ env.PROJECT_ID }} \
+              --memory 2Gi \
+              --cpu 2 \
+              --max-retries 0 \
+              --task-timeout 3600s \
+              --set-env-vars TILES_BUCKET=inference_result,BUCKET_BASE_URL=gs://inference_result/forecasts,TILES_PREFIX=tiles
+          fi
+
+      - name: 'Run Cloud Run Job'
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          if [ -n "${{ github.event.inputs.timestamp }}" ]; then
+            echo "Running job for specific timestamp: ${{ github.event.inputs.timestamp }}"
+            gcloud run jobs execute ${{ env.JOB_NAME }} \
+              --region ${{ env.GAR_LOCATION }} \
+              --project ${{ env.PROJECT_ID }} \
+              --format json \
+              --set-env-vars TIMESTAMP=${{ github.event.inputs.timestamp }}
+          else
+            echo "Running job for all timestamps..."
+            gcloud run jobs execute ${{ env.JOB_NAME }} \
+              --region ${{ env.GAR_LOCATION }} \
+              --project ${{ env.PROJECT_ID }} \
+              --format json
+          fi
