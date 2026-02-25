@@ -66,7 +66,7 @@ jobs:
           
           if gcloud run jobs describe ${{ env.JOB_NAME }} --region ${{ env.GAR_LOCATION }} --project ${{ env.PROJECT_ID }} 2>/dev/null; then
             echo "Updating existing job..."
-            gcloud run jobs update job ${{ env.JOB_NAME }} \
+            gcloud run jobs update ${{ env.JOB_NAME }} \
               --image "$IMAGE_URL" \
               --region ${{ env.GAR_LOCATION }} \
               --project ${{ env.PROJECT_ID }} \
@@ -77,7 +77,7 @@ jobs:
               --set-env-vars TILES_BUCKET=inference_result,BUCKET_BASE_URL=gs://inference_result/forecasts,TILES_PREFIX=tiles
           else
             echo "Creating new job..."
-            gcloud run jobs create job ${{ env.JOB_NAME }} \
+            gcloud run jobs create ${{ env.JOB_NAME }} \
               --image "$IMAGE_URL" \
               --region ${{ env.GAR_LOCATION }} \
               --project ${{ env.PROJECT_ID }} \
