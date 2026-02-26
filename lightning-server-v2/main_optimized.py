@@ -151,6 +151,13 @@ BANDS: Dict[str, BandConfig] = {
         colormap="plasma",
         invert=True
     ),
+    "radar": BandConfig(
+        name="Radar Reflectivity",
+        min=0,
+        max=75,  # dBZ typical range: 0-75
+        colormap="turbo",  # Good for radar - green to red
+        invert=False
+    ),
 }
 
 
