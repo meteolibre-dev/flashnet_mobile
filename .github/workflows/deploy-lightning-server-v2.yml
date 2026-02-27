@@ -39,7 +39,7 @@ jobs:
         uses: google-github-actions/get-secretmanager-secrets@v3
         with:
           secrets: |-
-            credentials:projects/${{ env.PROJECT_ID }}/secrets/lightning-server-credentials/latest
+            credentials:meteoforecast/lightning-server-credentials
 
       - name: 'Set up Cloud SDK'
         uses: 'google-github-actions/setup-gcloud@v2'
