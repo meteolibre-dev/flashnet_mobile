@@ -63,9 +63,7 @@ ZOOM_LEVELS = list(range(3, 9))  # 3 to 8 inclusive
 
 BANDS = {
     "lightning": {"min": 0, "max": 4, "colormap": "custom", "invert": False},
-    "sat_ch0": {"min": 0, "max": 12, "colormap": "viridis", "invert": False},
-    "sat_ch1": {"min": 3, "max": 120, "colormap": "plasma", "invert": True},
-    "sat_ch2": {"min": -3, "max": 120, "colormap": "plasma", "invert": True},
+    "radar": {"min": 0, "max": 75, "colormap": "turbo", "invert": False},
 }
 
 LIGHTNING_CMAP = {
@@ -397,7 +395,7 @@ def main():
         "--bands",
         type=str,
         nargs="+",
-        default=["lightning", "sat_ch0", "sat_ch1"],
+        default=["lightning", "radar"],
         help="Bands to process"
     )
     parser.add_argument(
