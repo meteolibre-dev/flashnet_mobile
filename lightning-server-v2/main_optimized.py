@@ -17,14 +17,19 @@ os.environ["GDAL_HTTP_MERGE_CONSECUTIVE_RANGES"] = "YES"
 
 def _get_gcs_access_token() -> str:
     """Get GCS access token from GCP metadata server or decode from credentials."""
+    print(f"[INIT] Checking for GCP_CREDENTIALS_BASE64 env var...")
+    
     # Option 1: Try to decode credentials from environment variable
     creds_base64 = os.getenv('GCP_CREDENTIALS_BASE64')
+    print(f"[INIT] GCP_CREDENTIALS_BASE64 present: {creds_base64 is not None}")
     if creds_base64:
+        print(f"[INIT] GCP_CREDENTIALS_BASE64 length: {len(creds_base64)}")
         try:
             import tempfile
             import base64
             creds_json = base64.b64decode(creds_base64).decode('utf-8')
             creds_data = json.loads(creds_json)
+            print(f"[INIT] Decoded credentials, client_email: {creds_data.get('client_email', 'N/A')}")
             
             if 'private_key' in creds_data and 'client_email' in creds_data:
                 # Write private key to temp file for GDAL
@@ -38,17 +43,26 @@ def _get_gcs_access_token() -> str:
         except Exception as e:
             print(f"[INIT] Failed to decode credentials: {e}")
     
+    # Check other env vars
+    gac_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
+    print(f"[INIT] GOOGLE_APPLICATION_CREDENTIALS: {gac_path}")
+    
     # Option 2: Try to get token from metadata server (Workload Identity)
+    print(f"[INIT] Trying metadata server for access token...")
     try:
         import requests as _requests
         metadata_url = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"
         resp = _requests.get(metadata_url, headers={"Metadata-Flavor": "Google"}, timeout=5)
+        print(f"[INIT] Metadata server response status: {resp.status_code}")
         if resp.status_code == 200:
             token_data = resp.json()
             if 'access_token' in token_data:
+                print(f"[INIT] Got access token from metadata server")
                 return token_data['access_token']
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[INIT] Failed to get token from metadata server: {e}")
+    
+    print(f"[INIT] No credentials found!")
     return None
 
 # Try to configure GDAL early (before rasterio imports)
@@ -56,6 +70,8 @@ _token = _get_gcs_access_token()
 if _token:
     os.environ['GS_ACCESS_TOKEN'] = _token
     print(f"[INIT] Set GS_ACCESS_TOKEN from metadata server")
+else:
+    print(f"[INIT] No GS_ACCESS_TOKEN set - GDAL may fail!")
 
 import re
 import json
