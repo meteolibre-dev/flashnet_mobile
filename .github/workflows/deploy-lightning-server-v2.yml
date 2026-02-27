@@ -57,6 +57,9 @@ jobs:
 
       - name: 'Deploy to Cloud Run'
         run: |
+          # Encode credentials to base64 to handle special characters
+          CREDENTIALS_B64=$(echo '${{ secrets.GCP_CREDENTIALS }}' | base64 -w 0)
+          
           gcloud run deploy ${{ env.SERVICE }} \
             --image ${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:${{ steps.git-sha.outputs.SHORT_SHA }} \
             --region ${{ env.GAR_LOCATION }} \
@@ -66,4 +69,4 @@ jobs:
             --memory 4Gi \
             --cpu 2 \
             --min-instances 1 \
-            --set-env-vars BUCKET_BASE_URL=gs://inference_result/forecasts,GCP_CREDENTIALS=${{ secrets.GCP_CREDENTIALS }}
+            --set-env-vars BUCKET_BASE_URL=gs://inference_result/forecasts,GCP_CREDENTIALS_B64=$CREDENTIALS_B64

@@ -17,17 +17,20 @@ os.environ["GDAL_HTTP_MERGE_CONSECUTIVE_RANGES"] = "YES"
 
 def _get_gcs_access_token() -> str:
     """Get GCS access token from GCP metadata server or decode from credentials."""
-    print(f"[INIT] Checking for GCP_CREDENTIALS env var...")
+    import base64
+    import tempfile
     
-    # Option 1: Try to read credentials from environment variable (raw JSON)
-    creds_json = os.getenv('GCP_CREDENTIALS')
-    print(f"[INIT] GCP_CREDENTIALS present: {creds_json is not None}")
-    if creds_json:
-        print(f"[INIT] GCP_CREDENTIALS length: {len(creds_json)}")
+    print(f"[INIT] Checking for GCP_CREDENTIALS_B64 env var...")
+    
+    # Option 1: Try to decode base64 credentials from environment variable
+    creds_base64 = os.getenv('GCP_CREDENTIALS_B64')
+    print(f"[INIT] GCP_CREDENTIALS_B64 present: {creds_base64 is not None}")
+    if creds_base64:
+        print(f"[INIT] GCP_CREDENTIALS_B64 length: {len(creds_base64)}")
         try:
-            import tempfile
+            creds_json = base64.b64decode(creds_base64).decode('utf-8')
             creds_data = json.loads(creds_json)
-            print(f"[INIT] Decoded credentials, client_email: {creds_data.get('client_email', 'N/A')}")
+            print(f"[INIT] Decoded base64 credentials, client_email: {creds_data.get('client_email', 'N/A')}")
             
             if 'private_key' in creds_data and 'client_email' in creds_data:
                 # Write private key to temp file for GDAL
@@ -39,19 +42,16 @@ def _get_gcs_access_token() -> str:
                     print(f"[INIT] Configured GDAL with service account: {creds_data['client_email']}")
                     return None  # No token needed, we're using OAuth2 key
         except Exception as e:
-            print(f"[INIT] Failed to decode credentials: {e}")
+            print(f"[INIT] Failed to decode base64 credentials: {e}")
     
-    # Check for base64-encoded credentials (fallback)
-    creds_base64 = os.getenv('GCP_CREDENTIALS_BASE64')
-    print(f"[INIT] GCP_CREDENTIALS_BASE64 present: {creds_base64 is not None}")
-    if creds_base64:
-        print(f"[INIT] GCP_CREDENTIALS_BASE64 length: {len(creds_base64)}")
+    # Option 2: Try to read credentials from environment variable (raw JSON)
+    creds_json = os.getenv('GCP_CREDENTIALS')
+    print(f"[INIT] GCP_CREDENTIALS present: {creds_json is not None}")
+    if creds_json:
+        print(f"[INIT] GCP_CREDENTIALS length: {len(creds_json)}")
         try:
-            import tempfile
-            import base64
-            creds_json = base64.b64decode(creds_base64).decode('utf-8')
             creds_data = json.loads(creds_json)
-            print(f"[INIT] Decoded base64 credentials, client_email: {creds_data.get('client_email', 'N/A')}")
+            print(f"[INIT] Decoded credentials, client_email: {creds_data.get('client_email', 'N/A')}")
             
             if 'private_key' in creds_data and 'client_email' in creds_data:
                 with tempfile.NamedTemporaryFile(mode='w', suffix='.pem', delete=False) as key_file:
@@ -62,7 +62,7 @@ def _get_gcs_access_token() -> str:
                     print(f"[INIT] Configured GDAL with service account: {creds_data['client_email']}")
                     return None
         except Exception as e:
-            print(f"[INIT] Failed to decode base64 credentials: {e}")
+            print(f"[INIT] Failed to decode credentials: {e}")
     
     # Check other env vars
     gac_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
