@@ -24,6 +24,7 @@ jobs:
     permissions:
       contents: 'read'
       id-token: 'write'
+      secret-manager: 'write'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -43,6 +44,13 @@ jobs:
       - name: Get Short Git SHA
         id: git-sha
         run: echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: 'Create Secret for Credentials'
+        run: |
+          # Create secret if it doesn't exist (ignore error if it does)
+          gcloud secrets create lightning-server-credentials --project=${{ env.PROJECT_ID }} 2>/dev/null || true
+          # Add new version with raw JSON credentials (not base64)
+          echo -n '${{ secrets.GCP_CREDENTIALS }}' | gcloud secrets versions add lightning-server-credentials --data-file=- --project=${{ env.PROJECT_ID }}
 
       - name: 'Build and Push Container Image'
         run: |
@@ -66,4 +74,5 @@ jobs:
             --memory 4Gi \
             --cpu 2 \
             --min-instances 1 \
-            --set-env-vars BUCKET_BASE_URL=gs://inference_result/forecasts,GOOGLE_SERVICE_ACCOUNT_EMAIL=lightning-server-signer@meteoforecast.iam.gserviceaccount.com
+            --set-env-vars BUCKET_BASE_URL=gs://inference_result/forecasts \
+            --set-secrets GCP_CREDENTIALS=lightning-server-credentials:latest
