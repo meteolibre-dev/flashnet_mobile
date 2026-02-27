@@ -6,6 +6,12 @@ Leverages COG internal overviews for instant low-zoom tiles.
 """
 
 import os
+os.environ["CPL_VSIL_CURL_ALLOWED_EXTENSIONS"] = "tif,tiff"
+os.environ["GDAL_DISABLE_READDIR_ON_OPEN"] = "EMPTY_DIR"
+os.environ["VSI_CACHE"] = "TRUE"
+os.environ["VSI_CACHE_SIZE"] = "50000000" # 50 MB
+os.environ["GDAL_HTTP_MERGE_CONSECUTIVE_RANGES"] = "YES"
+
 import re
 import logging
 from typing import Dict, Optional, Set
@@ -337,7 +343,7 @@ async def check_timestamp(timestamp: str):
 
 
 @app.get("/tiles/{z}/{x}/{y}.png")
-async def get_tile_png(
+def get_tile_png(
     z: int,
     x: int,
     y: int,
@@ -460,106 +466,6 @@ def generate_tile_rgba(x: int, y: int, z: int, band: str, time: str) -> Optional
     except Exception as e:
         logger.error(f"Error generating tile {z}/{x}/{y} band={band} time={time}: {e}")
         return None
-
-
-@app.get("/animation.webp")
-async def get_animation(
-    min_x: int = Query(..., description="Min tile X"),
-    max_x: int = Query(..., description="Max tile X"),
-    min_y: int = Query(..., description="Min tile Y"),
-    max_y: int = Query(..., description="Max tile Y"),
-    zoom: int = Query(..., description="Zoom level"),
-    band: str = Query(..., description="Band: lightning, sat_ch0, ..."),
-    start_time: str = Query(..., description="Start timestamp: YYYYMMDDHHMM"),
-    end_time: str = Query(..., description="End timestamp: YYYYMMDDHHMM"),
-    step_minutes: int = Query(10, description="Time step in minutes")
-):
-    """
-    Generate an animated WebP for the specified tile range and time range.
-    Returns a single animated WebP image with all frames.
-    """
-    if band not in BANDS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid band: {band}. Available: {list(BANDS.keys())}"
-        )
-    
-    # Parse timestamps and generate time list
-    try:
-        start_dt = datetime.strptime(start_time, "%Y%m%d%H%M")
-        end_dt = datetime.strptime(end_time, "%Y%m%d%H%M")
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid timestamp format. Use YYYYMMDDHHMM")
-    
-    # Generate list of timestamps
-    timestamps = []
-    current = start_dt
-    while current <= end_dt:
-        timestamps.append(current.strftime("%Y%m%d%H%M"))
-        current += timedelta(minutes=step_minutes)
-    
-    if not timestamps:
-        raise HTTPException(status_code=400, detail="No timestamps in range")
-    
-    # Limit frames to prevent huge downloads
-    max_frames = 30
-    if len(timestamps) > max_frames:
-        logger.warning(f"Limiting animation from {len(timestamps)} to {max_frames} frames")
-        timestamps = timestamps[:max_frames]
-    
-    logger.info(f"Generating animated WebP: {len(timestamps)} frames, tiles ({min_x}-{max_x}, {min_y}-{max_y}), zoom={zoom}")
-    
-    # Calculate total size
-    tile_width = max_x - min_x + 1
-    tile_height = max_y - min_y + 1
-    frame_width = tile_width * 256
-    frame_height = tile_height * 256
-    
-    # Generate all frames
-    frames = []
-    for i, timestamp in enumerate(timestamps):
-        # Create blank frame
-        frame = np.zeros((frame_height, frame_width, 4), dtype=np.uint8)
-        
-        # Fill each tile in the grid
-        for ty in range(min_y, max_y + 1):
-            for tx in range(min_x, max_x + 1):
-                rgba = generate_tile_rgba(tx, ty, zoom, band, timestamp)
-                if rgba is not None:
-                    # Copy tile into frame
-                    tile_offset_y = (ty - min_y) * 256
-                    tile_offset_x = (tx - min_x) * 256
-                    frame[tile_offset_y:tile_offset_y+256, tile_offset_x:tile_offset_x+256] = rgba
-        
-        # Convert to PIL Image
-        from PIL import Image
-        img = Image.fromarray(frame, mode='RGBA')
-        frames.append(img)
-    
-    # Save as animated WebP
-    from io import BytesIO
-    buffer = BytesIO()
-    
-    # Save first frame with duration for animation
-    # WebP animation: duration is in milliseconds per frame
-    frame_duration = 200  # 200ms per frame = 5 fps
-    
-    frames[0].save(
-        buffer,
-        format='WEBP',
-        save_all=True,
-        append_images=frames[1:],
-        duration=frame_duration,
-        loop=0,  # 0 = infinite loop
-        quality=85,
-        method=4
-    )
-    
-    buffer.seek(0)
-    logger.info(f"Generated animated WebP: {len(frames)} frames, {buffer.tell()} bytes")
-    
-    return Response(content=buffer.getvalue(), media_type="image/webp")
-
 
 @app.get("/tilejson")
 async def get_tilejson(
