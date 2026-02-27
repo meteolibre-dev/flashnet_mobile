@@ -12,6 +12,51 @@ os.environ["VSI_CACHE"] = "TRUE"
 os.environ["VSI_CACHE_SIZE"] = "50000000" # 50 MB
 os.environ["GDAL_HTTP_MERGE_CONSECUTIVE_RANGES"] = "YES"
 
+# Pre-fetch GCS access token for GDAL /vsigs/ access
+# This must be done BEFORE rasterio is imported
+
+def _get_gcs_access_token() -> str:
+    """Get GCS access token from GCP metadata server or decode from credentials."""
+    # Option 1: Try to decode credentials from environment variable
+    creds_base64 = os.getenv('GCP_CREDENTIALS_BASE64')
+    if creds_base64:
+        try:
+            import tempfile
+            import base64
+            creds_json = base64.b64decode(creds_base64).decode('utf-8')
+            creds_data = json.loads(creds_json)
+            
+            if 'private_key' in creds_data and 'client_email' in creds_data:
+                # Write private key to temp file for GDAL
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.pem', delete=False) as key_file:
+                    key_file.write(creds_data['private_key'])
+                    key_file.flush()
+                    os.environ['GS_OAUTH2_PRIVATE_KEY_FILE'] = key_file.name
+                    os.environ['GS_OAUTH2_CLIENT_EMAIL'] = creds_data['client_email']
+                    print(f"[INIT] Configured GDAL with service account: {creds_data['client_email']}")
+                    return None  # No token needed, we're using OAuth2 key
+        except Exception as e:
+            print(f"[INIT] Failed to decode credentials: {e}")
+    
+    # Option 2: Try to get token from metadata server (Workload Identity)
+    try:
+        import requests as _requests
+        metadata_url = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"
+        resp = _requests.get(metadata_url, headers={"Metadata-Flavor": "Google"}, timeout=5)
+        if resp.status_code == 200:
+            token_data = resp.json()
+            if 'access_token' in token_data:
+                return token_data['access_token']
+    except Exception:
+        pass
+    return None
+
+# Try to configure GDAL early (before rasterio imports)
+_token = _get_gcs_access_token()
+if _token:
+    os.environ['GS_ACCESS_TOKEN'] = _token
+    print(f"[INIT] Set GS_ACCESS_TOKEN from metadata server")
+
 import re
 import json
 import logging
@@ -75,23 +120,11 @@ REGION = {
 # GCS client for bucket operations (lazy initialization)
 _gcs_client = None
 _gcs_bucket_name = None
-_gdal_configured = False
-_gcs_token_expiry = None  # Track token expiry time
-
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize GDAL credentials on startup."""
-    global _gdal_configured
-    # Pre-initialize GCS client and GDAL credentials
-    get_gcs_client()
-    _gdal_configured = True
-    logger.info("GDAL GCS credentials configured on startup")
 
 
 def get_gcs_client():
     """Get or create GCS client for bucket listing operations."""
-    global _gcs_client, _gcs_bucket_name, _gdal_configured
+    global _gcs_client, _gcs_bucket_name
     if _gcs_client is None:
         _gcs_client = storage.Client()
         # Extract bucket name from URL
@@ -99,132 +132,8 @@ def get_gcs_client():
             _gcs_bucket_name = BUCKET_BASE_URL.replace("gs://", "").split("/")[0]
         else:
             _gcs_bucket_name = BUCKET_BASE_URL.replace("https://storage.googleapis.com/", "").split("/")[0]
-        
-        # Configure GDAL to use the same credentials for /vsigs/ access
-        if not _gdal_configured:
-            _configure_gdal_gcs_credentials()
-            _gdal_configured = True
 
     return _gcs_client, _gcs_bucket_name
-
-
-def _configure_gdal_gcs_credentials():
-    """Configure GDAL to use Google Cloud Storage credentials for /vsigs/ access.
-    
-    GDAL needs explicit configuration to access private GCS buckets.
-    With Workload Identity, we fetch the access token from the GCP metadata server.
-    """
-    # Try to get access token from GCP metadata server (Workload Identity)
-    try:
-        metadata_url = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"
-        resp = requests.get(metadata_url, headers={"Metadata-Flavor": "Google"}, timeout=5)
-        if resp.status_code == 200:
-            token_data = resp.json()
-            if 'access_token' in token_data:
-                os.environ['GS_ACCESS_TOKEN'] = token_data['access_token']
-                logger.info("Configured GDAL with access token from GCP metadata server")
-                return
-    except Exception as e:
-        logger.debug(f"Could not get token from metadata server: {e}")
-    
-    # Fallback: Try to get credentials from the GCS client
-    if _gcs_client is not None:
-        try:
-            creds = _gcs_client._credentials
-            
-            # Method 1: Try to get service account key (for service account key files)
-            if hasattr(creds, 'service_account_email') and hasattr(creds, 'service_account_key'):
-                service_account_email = creds.service_account_email
-                private_key = creds.service_account_key
-                
-                if private_key:
-                    import tempfile
-                    with tempfile.NamedTemporaryFile(mode='w', suffix='.pem', delete=False) as key_file:
-                        key_file.write(private_key)
-                        key_file.flush()
-                        os.environ['GS_OAUTH2_PRIVATE_KEY_FILE'] = key_file.name
-                        os.environ['GS_OAUTH2_CLIENT_EMAIL'] = service_account_email
-                        logger.info(f"Configured GDAL with service account from GCS client: {service_account_email}")
-                        return
-            
-            # Method 2: Refresh the credentials to get a token
-            try:
-                creds.refresh(None)  # Refresh to get fresh token
-                if hasattr(creds, 'token') and creds.token:
-                    os.environ['GS_ACCESS_TOKEN'] = creds.token
-                    logger.info(f"Configured GDAL with access token from GCS client")
-                    return
-            except Exception as e:
-                logger.debug(f"Could not refresh credentials: {e}")
-                
-        except Exception as e:
-            logger.debug(f"Could not get credentials from GCS client: {e}")
-    
-    # Fallback: Try to read from GOOGLE_APPLICATION_CREDENTIALS
-    gac_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
-    if not gac_path:
-        # On GCP (Cloud Run/Compute Engine), try default paths
-        default_paths = [
-            '/secrets/google_application_credentials.json',
-            '/app/default_credentials.json',
-        ]
-        for path in default_paths:
-            if os.path.exists(path):
-                gac_path = path
-                break
-    
-    if not gac_path or not os.path.exists(gac_path):
-        logger.warning("GOOGLE_APPLICATION_CREDENTIALS not set, GDAL may not be able to access GCS")
-        return
-    
-    try:
-        import tempfile
-        with open(gac_path, 'r') as f:
-            gac = json.load(f)
-        
-        if 'private_key' not in gac or 'client_email' not in gac:
-            logger.warning("GOOGLE_APPLICATION_CREDENTIALS file missing required fields")
-            return
-        
-        # Write private key to a temp file for GDAL
-        # GDAL requires the private key in a specific format
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.pem', delete=False) as key_file:
-            key_file.write(gac['private_key'])
-            key_file.flush()
-            os.environ['GS_OAUTH2_PRIVATE_KEY_FILE'] = key_file.name
-            os.environ['GS_OAUTH2_CLIENT_EMAIL'] = gac['client_email']
-            logger.info(f"Configured GDAL with service account: {gac['client_email']}")
-            
-    except Exception as e:
-        logger.warning(f"Failed to configure GDAL GCS credentials: {e}")
-
-
-def _refresh_gcs_token():
-    """Refresh the GCS access token for GDAL.
-    
-    Tokens from GCP metadata server expire after ~1 hour.
-    This function refreshes the token before it expires.
-    """
-    global _gcs_token_expiry
-    from datetime import datetime, timedelta
-    
-    # Check if token needs refresh (refresh if it expires within 10 minutes)
-    if _gcs_token_expiry and _gcs_token_expiry > datetime.utcnow() + timedelta(minutes=10):
-        return  # Token is still valid
-    
-    try:
-        metadata_url = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"
-        resp = requests.get(metadata_url, headers={"Metadata-Flavor": "Google"}, timeout=5)
-        if resp.status_code == 200:
-            token_data = resp.json()
-            if 'access_token' in token_data:
-                os.environ['GS_ACCESS_TOKEN'] = token_data['access_token']
-                # Set expiry (default is 3600 seconds, but we subtract some buffer)
-                expires_in = token_data.get('expires_in', 3600)
-                _gcs_token_expiry = datetime.utcnow() + timedelta(seconds=expires_in - 300)
-                logger.debug(f"Refreshed GCS access token, expires at {_gcs_token_expiry}")
-    except Exception as e:
-        logger.warning(f"Failed to refresh GCS token: {e}")
 
 
 # Band configuration - matches inference output naming
@@ -295,9 +204,6 @@ def get_cog_url(timestamp: str, band: str) -> str:
     # Ensure bucket name is initialized (lazy initialization)
     if _gcs_bucket_name is None:
         get_gcs_client()
-    
-    # Refresh GCS access token if needed (token expires after ~1 hour)
-    _refresh_gcs_token()
     
     # Convert YYYYMMDD to YYYY-MM-DD for bucket path
     date_folder = f"{timestamp[:4]}-{timestamp[4:6]}-{timestamp[6:8]}"
