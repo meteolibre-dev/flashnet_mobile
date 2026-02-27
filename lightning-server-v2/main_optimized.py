@@ -452,65 +452,78 @@ def generate_tile_rgba(x: int, y: int, z: int, band: str, time: str) -> Optional
     
     config = BANDS[band]
     
-    try:
-        url = get_cog_url(time, band)
-    except Exception as e:
-        logger.error(f"Failed to get COG URL for tile {z}/{x}/{y} band={band} time={time}: {e}")
-        return None
+    # Retry logic for transient GCS/network errors
+    max_retries = 3
+    retry_delay = 0.5  # seconds
     
-    try:
-        with COGReader(url) as cog:
-            tile = cog.tile(x, y, z, tilesize=256, indexes=(1,))
-            data = tile.data[0].astype(np.float32)
-            
-            nodata_value = cog.nodata if hasattr(cog, 'nodata') else None
-            
-            nodata_mask = None
-            if nodata_value is not None:
-                nodata_mask = (data == nodata_value) | (~np.isfinite(data))
-            elif tile.mask is not None:
-                nodata_mask = ~tile.mask.astype(bool)
-            elif np.any(~np.isfinite(data)):
-                nodata_mask = ~np.isfinite(data)
-            
-            data = np.clip(data, config.min, config.max)
-            data = ((data - config.min) / (config.max - config.min) * 255).astype(np.uint8)
-            
-            if band == "lightning":
-                rgba = np.zeros((256, 256, 4), dtype=np.uint8)
+    for attempt in range(max_retries):
+        try:
+            url = get_cog_url(time, band)
+        except Exception as e:
+            logger.error(f"Failed to get COG URL for tile {z}/{x}/{y} band={band} time={time}: {e}")
+            return None
+        
+        try:
+            with COGReader(url) as cog:
+                tile = cog.tile(x, y, z, tilesize=256, indexes=(1,))
+                data = tile.data[0].astype(np.float32)
                 
-                non_zero_mask = data > 0
-                rgba[non_zero_mask] = [255, 255, 0, 150]
+                nodata_value = cog.nodata if hasattr(cog, 'nodata') else None
                 
-                for val, color in LIGHTNING_CMAP.items():
-                    if val > 0:
-                        mask = data >= int(val * 255 / config.max)
-                        rgba[mask] = color
+                nodata_mask = None
+                if nodata_value is not None:
+                    nodata_mask = (data == nodata_value) | (~np.isfinite(data))
+                elif tile.mask is not None:
+                    nodata_mask = ~tile.mask.astype(bool)
+                elif np.any(~np.isfinite(data)):
+                    nodata_mask = ~np.isfinite(data)
                 
-                if nodata_mask is not None:
-                    rgba[nodata_mask] = [0, 0, 0, 0]
+                data = np.clip(data, config.min, config.max)
+                data = ((data - config.min) / (config.max - config.min) * 255).astype(np.uint8)
+                
+                if band == "lightning":
+                    rgba = np.zeros((256, 256, 4), dtype=np.uint8)
+                    
+                    non_zero_mask = data > 0
+                    rgba[non_zero_mask] = [255, 255, 0, 150]
+                    
+                    for val, color in LIGHTNING_CMAP.items():
+                        if val > 0:
+                            mask = data >= int(val * 255 / config.max)
+                            rgba[mask] = color
+                    
+                    if nodata_mask is not None:
+                        rgba[nodata_mask] = [0, 0, 0, 0]
+                else:
+                    from matplotlib import cm
+                    
+                    cmap = cm.get_cmap(config.colormap)
+                    if config.invert:
+                        cmap = cmap.reversed()
+                    
+                    normalized = data.astype(float) / 255.0
+                    rgba = (cmap(normalized) * 255).astype(np.uint8)
+                    rgba[:, :, 3] = 255
+                    
+                    zero_mask = data == 0
+                    rgba[zero_mask] = [0, 0, 0, 0]
+                    
+                    if nodata_mask is not None:
+                        rgba[nodata_mask] = [0, 0, 0, 0]
+                
+                return rgba
+                
+        except Exception as e:
+            if attempt < max_retries - 1:
+                logger.warning(f"Error generating tile {z}/{x}/{y} band={band} time={time}, retrying ({attempt + 1}/{max_retries}): {e}")
+                import time as time_module
+                time_module.sleep(retry_delay)
             else:
-                from matplotlib import cm
-                
-                cmap = cm.get_cmap(config.colormap)
-                if config.invert:
-                    cmap = cmap.reversed()
-                
-                normalized = data.astype(float) / 255.0
-                rgba = (cmap(normalized) * 255).astype(np.uint8)
-                rgba[:, :, 3] = 255
-                
-                zero_mask = data == 0
-                rgba[zero_mask] = [0, 0, 0, 0]
-                
-                if nodata_mask is not None:
-                    rgba[nodata_mask] = [0, 0, 0, 0]
-            
-            return rgba
-            
-    except Exception as e:
-        logger.error(f"Error generating tile {z}/{x}/{y} band={band} time={time}: {e}")
-        return None
+                logger.error(f"Error generating tile {z}/{x}/{y} band={band} time={time}: {e}")
+                return None
+    
+    return None
+
 
 @app.get("/tilejson")
 async def get_tilejson(
