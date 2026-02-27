@@ -19,6 +19,7 @@ def _get_gcs_access_token() -> str:
     """Get GCS access token from GCP metadata server or decode from credentials."""
     import base64
     import tempfile
+    import json
     
     print(f"[INIT] Checking for GCP_CREDENTIALS_B64 env var...")
     
