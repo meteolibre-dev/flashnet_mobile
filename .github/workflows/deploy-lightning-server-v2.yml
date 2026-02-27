@@ -34,13 +34,6 @@ jobs:
         with:
           credentials_json: '${{ secrets.GCP_CREDENTIALS }}'
 
-      - name: Get GCP Credentials for Cloud Run
-        id: secrets
-        uses: google-github-actions/get-secretmanager-secrets@v3
-        with:
-          secrets: |-
-            credentials:meteoforecast/lightning-server-credentials
-
       - name: 'Set up Cloud SDK'
         uses: 'google-github-actions/setup-gcloud@v2'
 
@@ -50,13 +43,6 @@ jobs:
       - name: Get Short Git SHA
         id: git-sha
         run: echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-
-      - name: 'Create Secret for Credentials'
-        run: |
-          # Create secret if it doesn't exist (ignore error if it does)
-          gcloud secrets create lightning-server-credentials --project=${{ env.PROJECT_ID }} 2>/dev/null || true
-          # Add new version with raw JSON credentials (not base64)
-          echo -n '${{ secrets.GCP_CREDENTIALS }}' | gcloud secrets versions add lightning-server-credentials --data-file=- --project=${{ env.PROJECT_ID }}
 
       - name: 'Build and Push Container Image'
         run: |
@@ -80,4 +66,4 @@ jobs:
             --memory 4Gi \
             --cpu 2 \
             --min-instances 1 \
-            --set-env-vars BUCKET_BASE_URL=gs://inference_result/forecasts,GCP_CREDENTIALS=${{ steps.secrets.outputs.credentials }}
+            --set-env-vars BUCKET_BASE_URL=gs://inference_result/forecasts,GCP_CREDENTIALS=${{ secrets.GCP_CREDENTIALS }}
