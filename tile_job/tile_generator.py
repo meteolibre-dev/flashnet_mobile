@@ -88,13 +88,15 @@ def discover_timestamps(n: int = 18) -> List[str]:
         bucket = client.bucket(BUCKET_NAME)
         prefix = "forecasts/"
         
-        blobs = list(bucket.list_blobs(prefix=prefix, delimiter="/"))
+        # Use delimiter to get "common prefixes" (date folders)
+        blobs = bucket.list_blobs(prefix=prefix, delimiter="/")
         
         date_folders = set()
-        for blob in blobs:
-            if blob.name.endswith("/"):
-                continue
-            match = re.search(r"forecasts/(\d{4}-\d{2}-\d{2})/", blob.name)
+        
+        # When using delimiter, prefixes (date folders) are in the prefixes property
+        # The prefix format is like "forecasts/2026-02-27/"
+        for date_prefix in blobs.prefixes:
+            match = re.search(r"(\d{4}-\d{2}-\d{2})/", date_prefix)
             if match:
                 date_folders.add(match.group(1))
         
