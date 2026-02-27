@@ -294,43 +294,135 @@ def generate_tiles_for_band_timestamp(
         "zoom_levels": zoom_levels,
     }
     
+    if not RIO_TILER_AVAILABLE:
+        logger.error("rio-tiler not available")
+        return stats
+    
     cog_url = get_cog_url(timestamp, band)
     logger.info(f"Processing {band} for {timestamp} from {cog_url}")
     
-    for z in zoom_levels:
-        tiles = get_tiles_for_region(region_bounds, z)
-        logger.info(f"Zoom {z}: {len(tiles)} tiles to generate")
-        
-        for x, y in tiles:
-            try:
-                rgba = generate_tile_rgba(cog_url, x, y, z, band)
+    # Create GCS client once for all uploads
+    gcs_client = None
+    if GCS_AVAILABLE and not dry_run:
+        gcs_client = storage.Client()
+    
+    config = BANDS.get(band, {})
+    if not config:
+        logger.error(f"Unknown band: {band}")
+        return stats
+    
+    try:
+        # Open COG reader ONCE and reuse for all tiles
+        with Reader(cog_url) as cog:
+            for z in zoom_levels:
+                tiles = get_tiles_for_region(region_bounds, z)
+                logger.info(f"Zoom {z}: {len(tiles)} tiles to generate")
                 
-                if rgba is None:
-                    stats["tiles_skipped"] += 1
-                    continue
-                
-                png_data = tile_to_png(rgba, format=output_format)
-                
-                ext = "png" if output_format == "PNG" else "webp"
-                blob_path = f"{prefix}/{band}/{timestamp}/{z}/{x}/{y}.{ext}"
-                
-                if dry_run:
-                    logger.info(f"[DRY RUN] Would upload: {blob_path} ({len(png_data)} bytes)")
-                else:
-                    success = upload_to_gcs(bucket_name, blob_path, png_data)
-                    if success:
-                        stats["tiles_generated"] += 1
-                    else:
+                for x, y in tiles:
+                    try:
+                        rgba = _generate_single_tile(cog, x, y, z, band, config)
+                        
+                        if rgba is None:
+                            stats["tiles_skipped"] += 1
+                            continue
+                        
+                        png_data = tile_to_png(rgba, format=output_format)
+                        
+                        ext = "png" if output_format == "PNG" else "webp"
+                        blob_path = f"{prefix}/{band}/{timestamp}/{z}/{x}/{y}.{ext}"
+                        
+                        if dry_run:
+                            logger.info(f"[DRY RUN] Would upload: {blob_path} ({len(png_data)} bytes)")
+                        else:
+                            success = _upload_to_gcs(gcs_client, bucket_name, blob_path, png_data)
+                            if success:
+                                stats["tiles_generated"] += 1
+                            else:
+                                stats["tiles_failed"] += 1
+                        
+                    except Exception as e:
+                        logger.error(f"Error processing tile {z}/{x}/{y}: {e}")
                         stats["tiles_failed"] += 1
-                
-            except Exception as e:
-                logger.error(f"Error processing tile {z}/{x}/{y}: {e}")
-                stats["tiles_failed"] += 1
+    
+    except Exception as e:
+        logger.error(f"Error opening COG {cog_url}: {e}")
+        return stats
     
     logger.info(f"Completed {band}/{timestamp}: {stats['tiles_generated']} generated, "
                 f"{stats['tiles_skipped']} skipped, {stats['tiles_failed']} failed")
     
     return stats
+
+
+def _generate_single_tile(cog, x: int, y: int, z: int, band: str, config: dict) -> Optional[np.ndarray]:
+    """Generate a single tile from an already-open COG reader."""
+    try:
+        tile = cog.tile(x, y, z, tilesize=256, indexes=(1,))
+        data = tile.data[0].astype(np.float32)
+        
+        nodata_value = cog.nodata if hasattr(cog, 'nodata') else None
+        
+        nodata_mask = None
+        if nodata_value is not None:
+            nodata_mask = (data == nodata_value) | (~np.isfinite(data))
+        elif tile.mask is not None:
+            nodata_mask = ~tile.mask.astype(bool)
+        elif np.any(~np.isfinite(data)):
+            nodata_mask = ~np.isfinite(data)
+        
+        data = np.clip(data, config["min"], config["max"])
+        data = ((data - config["min"]) / (config["max"] - config["min"]) * 255).astype(np.uint8)
+        
+        if band == "lightning":
+            rgba = np.zeros((256, 256, 4), dtype=np.uint8)
+            
+            for val, color in LIGHTNING_CMAP.items():
+                if val > 0:
+                    mask = data >= int(val * 255 / config["max"])
+                    rgba[mask] = color
+            
+            non_zero_mask = data > 0
+            rgba[non_zero_mask & (rgba[:, :, 3] == 0)] = [255, 255, 0, 150]
+            
+            if nodata_mask is not None:
+                rgba[nodata_mask] = [0, 0, 0, 0]
+        else:
+            from matplotlib import cm
+            
+            cmap = cm.get_cmap(config["colormap"])
+            if config["invert"]:
+                cmap = cmap.reversed()
+            
+            normalized = data.astype(float) / 255.0
+            rgba = (cmap(normalized) * 255).astype(np.uint8)
+            rgba[:, :, 3] = 255
+            
+            zero_mask = data == 0
+            rgba[zero_mask] = [0, 0, 0, 0]
+            
+            if nodata_mask is not None:
+                rgba[nodata_mask] = [0, 0, 0, 0]
+        
+        return rgba
+        
+    except Exception as e:
+        logger.warning(f"Error generating tile {z}/{x}/{y}: {e}")
+        return None
+
+
+def _upload_to_gcs(client, bucket_name: str, blob_path: str, data: bytes) -> bool:
+    """Upload data to GCS using a pre-created client."""
+    if client is None:
+        return False
+    
+    try:
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(blob_path)
+        blob.upload_from_string(data, content_type=f"image/{'png' if blob_path.endswith('.png') else 'webp'}")
+        return True
+    except Exception as e:
+        logger.error(f"Error uploading to GCS: {e}")
+        return False
 
 
 def generate_tiles_for_timestamp(
@@ -435,7 +527,7 @@ def main():
     parser.add_argument(
         "--workers",
         type=int,
-        default=4,
+        default=8,
         help="Number of parallel workers"
     )
     parser.add_argument(
