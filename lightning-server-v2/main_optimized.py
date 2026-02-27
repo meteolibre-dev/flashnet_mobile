@@ -38,8 +38,6 @@ from rio_tiler.io import COGReader
 
 # Google Cloud Storage for bucket listing
 from google.cloud import storage
-from google.auth import compute_engine
-from google.auth.transport.requests import Request
 
 # Logging configuration
 logging.basicConfig(level=logging.INFO)
@@ -73,15 +71,14 @@ REGION = {
     "south": 33.0,
 }
 
-# GCS client for signed URLs (lazy initialization)
+# GCS client for bucket operations (lazy initialization)
 _gcs_client = None
 _gcs_bucket_name = None
-_gcs_service_account_email = None
 
 
 def get_gcs_client():
-    """Get or create GCS client for signed URL generation."""
-    global _gcs_client, _gcs_bucket_name, _gcs_service_account_email
+    """Get or create GCS client for bucket listing operations."""
+    global _gcs_client, _gcs_bucket_name
     if _gcs_client is None:
         _gcs_client = storage.Client()
         # Extract bucket name from URL
@@ -90,31 +87,7 @@ def get_gcs_client():
         else:
             _gcs_bucket_name = BUCKET_BASE_URL.replace("https://storage.googleapis.com/", "").split("/")[0]
 
-        # Get service account email for IAM Sign Blob API (needed for Cloud Run)
-        # This allows generating signed URLs without a private key
-        _gcs_service_account_email = os.getenv("GOOGLE_SERVICE_ACCOUNT_EMAIL")
-        if _gcs_service_account_email is None:
-            # Try to get from GCP metadata server (automatic on Cloud Run)
-            try:
-                metadata_url = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email"
-                resp = requests.get(metadata_url, headers={"Metadata-Flavor": "Google"}, timeout=2)
-                if resp.status_code == 200:
-                    _gcs_service_account_email = resp.text.strip()
-            except Exception:
-                pass  # Not running on GCP or metadata not available
-
-    return _gcs_client, _gcs_bucket_name, _gcs_service_account_email
-
-
-def get_signing_credentials(service_account_email: str):
-    """Get signing credentials for Cloud Run/Compute Engine environments."""
-    auth_request = Request()
-    signing_credentials = compute_engine.IDTokenCredentials(
-        auth_request,
-        "",
-        service_account_email=service_account_email
-    )
-    return signing_credentials
+    return _gcs_client, _gcs_bucket_name
 
 
 # Band configuration - matches inference output naming
@@ -167,43 +140,31 @@ BANDS: Dict[str, BandConfig] = {
 }
 
 
-def get_cog_url(timestamp: str, band: str, signed: bool = True) -> str:
+def get_cog_url(timestamp: str, band: str) -> str:
     """
     Generate the COG URL for a given timestamp and band.
+    Uses GDAL's /vsigs/ virtual file system which natively supports 
+    Google Application Default Credentials (ADC).
+    
+    This eliminates the signed URL bottleneck (50-200ms per request)
+    by letting GDAL handle GCS authentication directly.
+    
     Matches the naming convention from inference_engine.py:
     - forecast_{timestamp}_sat_ch{0,1,...}.tiff
     - forecast_{timestamp}_lightning.tiff
-
-    If signed=True (default), generates a signed URL for private bucket access.
     """
+    global _gcs_bucket_name
+    
+    # Ensure bucket name is initialized (lazy initialization)
+    if _gcs_bucket_name is None:
+        get_gcs_client()
+    
     # Convert YYYYMMDD to YYYY-MM-DD for bucket path
     date_folder = f"{timestamp[:4]}-{timestamp[4:6]}-{timestamp[6:8]}"
-    blob_path = f"forecasts/{date_folder}/forecast_{timestamp}_{band}.tiff"
-
-    if signed and BUCKET_BASE_URL.startswith("gs://"):
-        # Generate signed URL for private bucket access
-        client, bucket_name, service_account_email = get_gcs_client()
-        bucket = client.bucket(bucket_name)
-        blob = bucket.blob(blob_path)
-        # Use compute_engine.IDTokenCredentials for Cloud Run/Compute Engine
-        if service_account_email:
-            signing_credentials = get_signing_credentials(service_account_email)
-            return blob.generate_signed_url(
-                version="v4",
-                expiration=timedelta(hours=1),
-                method="GET",
-                credentials=signing_credentials
-            )
-        else:
-            # Fallback to standard signed URL (requires private key)
-            return blob.generate_signed_url(
-                version="v4",
-                expiration=timedelta(hours=1),
-                method="GET"
-            )
-    else:
-        # Public URL or local file
-        return f"{BUCKET_BASE_URL}/{date_folder}/forecast_{timestamp}_{band}.tiff"
+    
+    # GDAL natively understands /vsigs/ and uses your Google Application Default Credentials
+    # No signed URL generation needed - eliminates 50-200ms latency per tile
+    return f"/vsigs/{_gcs_bucket_name}/forecasts/{date_folder}/forecast_{timestamp}_{band}.tiff"
 
 
 # Custom colormap for lightning (yellow -> red)
@@ -274,7 +235,7 @@ async def get_available_timesteps(
     """
     try:
         # Initialize GCS client using the helper
-        storage_client, bucket_name, _ = get_gcs_client()
+        storage_client, bucket_name = get_gcs_client()
         bucket = storage_client.bucket(bucket_name)
 
         # Track timestamps and their available bands
@@ -410,7 +371,7 @@ def generate_tile_rgba(x: int, y: int, z: int, band: str, time: str) -> Optional
     try:
         url = get_cog_url(time, band)
     except Exception as e:
-        logger.error(f"Failed to generate signed URL for tile {z}/{x}/{y} band={band} time={time}: {e}")
+        logger.error(f"Failed to get COG URL for tile {z}/{x}/{y} band={band} time={time}: {e}")
         return None
     
     try:
@@ -528,7 +489,7 @@ async def get_bounds(
     try:
         url = get_cog_url(time, band)
     except Exception as e:
-        # Signed URL generation failed - return default bounds
+        # COG URL generation failed - return default bounds
         return JSONResponse({
             "url": f"gs://inference_result/forecasts/{time[:4]}-{time[4:6]}-{time[6:8]}/forecast_{time}_{band}.tiff",
             "bounds": default_bounds,
@@ -536,7 +497,7 @@ async def get_bounds(
             "size": None,
             "nodata": None,
             "overviews": [],
-            "error": f"Failed to generate signed URL: {str(e)}"
+            "error": f"Failed to get COG URL: {str(e)}"
         })
 
     try:
