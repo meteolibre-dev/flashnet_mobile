@@ -282,7 +282,8 @@ def generate_tiles_for_band_timestamp(
     bucket_name: str = TILES_BUCKET,
     prefix: str = TILES_PREFIX,
     output_format: str = "PNG",
-    dry_run: bool = False
+    dry_run: bool = False,
+    tile_workers: int = 8
 ) -> dict:
     """Generate all tiles for a specific band and timestamp."""
     stats = {
@@ -311,38 +312,66 @@ def generate_tiles_for_band_timestamp(
         logger.error(f"Unknown band: {band}")
         return stats
     
+    # Collect all tile coordinates
+    all_tiles = []
+    for z in zoom_levels:
+        tiles = get_tiles_for_region(region_bounds, z)
+        for x, y in tiles:
+            all_tiles.append((x, y, z))
+    
+    logger.info(f"Total tiles to process: {len(all_tiles)}")
+    
+    # Process tiles in chunks for parallel upload
+    chunk_size = 32
+    
     try:
         # Open COG reader ONCE and reuse for all tiles
         with Reader(cog_url) as cog:
-            for z in zoom_levels:
-                tiles = get_tiles_for_region(region_bounds, z)
-                logger.info(f"Zoom {z}: {len(tiles)} tiles to generate")
+            for i in range(0, len(all_tiles), chunk_size):
+                chunk = all_tiles[i:i + chunk_size]
+                logger.info(f"Processing chunk {i//chunk_size + 1}: {len(chunk)} tiles")
                 
-                for x, y in tiles:
+                # Generate all tiles in chunk sequentially (COG reader is not thread-safe)
+                tile_data = []
+                for x, y, z in chunk:
                     try:
                         rgba = _generate_single_tile(cog, x, y, z, band, config)
-                        
                         if rgba is None:
                             stats["tiles_skipped"] += 1
                             continue
                         
                         png_data = tile_to_png(rgba, format=output_format)
-                        
                         ext = "png" if output_format == "PNG" else "webp"
                         blob_path = f"{prefix}/{band}/{timestamp}/{z}/{x}/{y}.{ext}"
                         
-                        if dry_run:
-                            logger.info(f"[DRY RUN] Would upload: {blob_path} ({len(png_data)} bytes)")
-                        else:
-                            success = _upload_to_gcs(gcs_client, bucket_name, blob_path, png_data)
-                            if success:
-                                stats["tiles_generated"] += 1
-                            else:
-                                stats["tiles_failed"] += 1
+                        tile_data.append((blob_path, png_data))
                         
                     except Exception as e:
-                        logger.error(f"Error processing tile {z}/{x}/{y}: {e}")
+                        logger.error(f"Error generating tile {z}/{x}/{y}: {e}")
                         stats["tiles_failed"] += 1
+                
+                # Upload all tiles in parallel
+                if tile_data and not dry_run:
+                    with ThreadPoolExecutor(max_workers=tile_workers) as executor:
+                        futures = {
+                            executor.submit(_upload_to_gcs, gcs_client, bucket_name, path, data): idx
+                            for idx, (path, data) in enumerate(tile_data)
+                        }
+                        
+                        for future in as_completed(futures):
+                            idx = futures[future]
+                            try:
+                                if future.result():
+                                    stats["tiles_generated"] += 1
+                                else:
+                                    stats["tiles_failed"] += 1
+                            except Exception as e:
+                                logger.error(f"Error uploading tile: {e}")
+                                stats["tiles_failed"] += 1
+                elif dry_run:
+                    for path, data in tile_data:
+                        logger.info(f"[DRY RUN] Would upload: {path} ({len(data)} bytes)")
+                        stats["tiles_generated"] += 1
     
     except Exception as e:
         logger.error(f"Error opening COG {cog_url}: {e}")
