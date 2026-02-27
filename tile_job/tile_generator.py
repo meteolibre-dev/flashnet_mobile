@@ -86,6 +86,14 @@ def discover_timestamps(n: int = 18) -> List[str]:
         bucket = client.bucket(BUCKET_NAME)
         prefix = "forecasts/"
         
+        logger.info(f"Searching for timestamps in bucket={BUCKET_NAME}, prefix={prefix}")
+        
+        # First, let's see what blobs exist at the forecasts/ level
+        test_blobs = list(bucket.list_blobs(prefix="forecasts", max_results=10))
+        logger.info(f"Test listing at 'forecasts': found {len(test_blobs)} items")
+        for b in test_blobs[:5]:
+            logger.info(f"  Blob: {b.name}")
+        
         # Use delimiter to get "common prefixes" (date folders)
         blobs = bucket.list_blobs(prefix=prefix, delimiter="/")
         
@@ -93,13 +101,26 @@ def discover_timestamps(n: int = 18) -> List[str]:
         
         # When using delimiter, prefixes (date folders) are in the prefixes property
         # The prefix format is like "forecasts/2026-02-27/"
-        for date_prefix in blobs.prefixes:
-            match = re.search(r"(\d{4}-\d{2}-\d{2})/", date_prefix)
-            if match:
-                date_folders.add(match.group(1))
+        prefixes = list(blobs.prefixes) if hasattr(blobs, 'prefixes') else []
+        logger.info(f"Found prefixes from delimiter: {prefixes}")
+        
+        # If no prefixes found via delimiter, try extracting from blob names
+        if not prefixes:
+            logger.info("Trying fallback: extracting dates from blob names")
+            all_blobs = list(bucket.list_blobs(prefix=prefix))
+            for blob in all_blobs:
+                match = re.search(r"forecasts/(\d{4}-\d{2}-\d{2})/", blob.name)
+                if match:
+                    date_folders.add(match.group(1))
+        else:
+            for date_prefix in prefixes:
+                match = re.search(r"(\d{4}-\d{2}-\d{2})/", date_prefix)
+                if match:
+                    date_folders.add(match.group(1))
         
         if not date_folders:
             logger.warning("No date folders found in bucket")
+            logger.warning(f"Prefix used: {prefix}, prefixes found: {prefixes}")
             return []
         
         sorted_dates = sorted(date_folders, reverse=True)[:n]
