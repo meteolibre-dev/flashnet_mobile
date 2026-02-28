@@ -451,6 +451,42 @@ async def check_timestamp(timestamp: str):
     return {"timestamp": timestamp, "bands": results}
 
 
+@app.get("/debug/gcs")
+async def debug_gcs():
+    """Debug GCS configuration and connectivity."""
+    import rasterio
+    
+    result = {
+        "env_vars": {
+            "GS_ACCESS_TOKEN": "***" if os.getenv("GS_ACCESS_TOKEN") else None,
+            "GS_OAUTH2_PRIVATE_KEY_FILE": os.getenv("GS_OAUTH2_PRIVATE_KEY_FILE"),
+            "GS_OAUTH2_CLIENT_EMAIL": os.getenv("GS_OAUTH2_CLIENT_EMAIL"),
+            "GOOGLE_APPLICATION_CREDENTIALS": os.getenv("GOOGLE_APPLICATION_CREDENTIALS"),
+            "GCP_CREDENTIALS_B64": "***set***" if os.getenv("GCP_CREDENTIALS_B64") else None,
+            "GCP_CREDENTIALS": "***set***" if os.getenv("GCP_CREDENTIALS") else None,
+        },
+        "gdal_version": rasterio.__gdal_version__,
+        "rasterio_version": rasterio.__version__,
+    }
+    
+    # Test GCS connectivity
+    try:
+        from rasterio import _env
+        result["gdal_data"] = _env.get_gdal_data()
+    except Exception as e:
+        result["gdal_data_error"] = str(e)
+    
+    # Test reading a small file from GCS
+    try:
+        test_url = "/vsigs/inference_result/forecasts/2026-02-28/"
+        logger.info(f"Testing GCS access to: {test_url}")
+        result["gcs_test"] = "URL generated OK"
+    except Exception as e:
+        result["gcs_test_error"] = str(e)
+    
+    return result
+
+
 @app.get("/tiles/{z}/{x}/{y}.png")
 def get_tile_png(
     z: int,
@@ -522,6 +558,7 @@ def generate_tile_rgba(x: int, y: int, z: int, band: str, time: str) -> Optional
     for attempt in range(max_retries):
         try:
             url = get_cog_url(time, band)
+            logger.debug(f"COG URL for {time}/{band}: {url}")
         except Exception as e:
             import traceback
             logger.error(f"Failed to get COG URL for tile {z}/{x}/{y} band={band} time={time}: {e}")
@@ -530,6 +567,7 @@ def generate_tile_rgba(x: int, y: int, z: int, band: str, time: str) -> Optional
         
         # Verify file is ready before attempting to read
         # This prevents GDAL decoding errors from incomplete files
+        logger.debug(f"Verifying file ready for {time}/{band}...")
         if not verify_cog_file_ready(time, band):
             if attempt < max_retries - 1:
                 logger.warning(f"File not ready for {time}/{band}, retrying ({attempt + 1}/{max_retries})")
@@ -540,8 +578,10 @@ def generate_tile_rgba(x: int, y: int, z: int, band: str, time: str) -> Optional
                 logger.error(f"File not available after {max_retries} attempts: {time}/{band}")
                 return None
         
+        logger.debug(f"Opening COGReader for {url}...")
         try:
             with COGReader(url) as cog:
+                logger.debug(f"COGReader opened, fetching tile {z}/{x}/{y}...")
                 tile = cog.tile(x, y, z, tilesize=256, indexes=(1,))
                 data = tile.data[0].astype(np.float32)
                 
