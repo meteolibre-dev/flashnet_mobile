@@ -8,9 +8,13 @@ Leverages COG internal overviews for instant low-zoom tiles.
 import os
 os.environ["CPL_VSIL_CURL_ALLOWED_EXTENSIONS"] = "tif,tiff"
 os.environ["GDAL_DISABLE_READDIR_ON_OPEN"] = "EMPTY_DIR"
-os.environ["VSI_CACHE"] = "TRUE"
-os.environ["VSI_CACHE_SIZE"] = "50000000" # 50 MB
+# VSI_CACHE can cause issues with cloud reads - disable or use with care
+# See: https://github.com/OSGeo/gdal/issues/9658
+os.environ["VSI_CACHE"] = "FALSE"  # Disable to avoid stale/corrupted cache
+os.environ["VSI_CACHE_SIZE"] = "50000000" # 50 MB (not used if VSI_CACHE=FALSE)
 os.environ["GDAL_HTTP_MERGE_CONSECUTIVE_RANGES"] = "YES"
+# Disable caching for /vsigs/ to avoid stale data issues
+os.environ["CPL_VSIL_CURL_NON_CACHED"] = "/vsigs/"
 
 
 
