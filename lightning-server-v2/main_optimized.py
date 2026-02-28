@@ -12,6 +12,9 @@ os.environ["VSI_CACHE"] = "TRUE"
 os.environ["VSI_CACHE_SIZE"] = "50000000" # 50 MB
 os.environ["GDAL_HTTP_MERGE_CONSECUTIVE_RANGES"] = "YES"
 
+
+
+
 # Pre-fetch GCS access token for GDAL /vsigs/ access
 # This must be done BEFORE rasterio is imported
 
@@ -99,6 +102,8 @@ import re
 import json
 import logging
 from typing import Dict, Optional, Set
+from io import BytesIO
+from PIL import Image
 
 logger = logging.getLogger(__name__)
 
@@ -458,8 +463,7 @@ def get_tile_png(
     Get a PNG tile for the specified band and time.
     Uses COG internal overviews for optimal performance.
     """
-    from io import BytesIO
-    from PIL import Image
+
     
     rgba = generate_tile_rgba(x, y, z, band, time)
     
@@ -519,7 +523,9 @@ def generate_tile_rgba(x: int, y: int, z: int, band: str, time: str) -> Optional
         try:
             url = get_cog_url(time, band)
         except Exception as e:
+            import traceback
             logger.error(f"Failed to get COG URL for tile {z}/{x}/{y} band={band} time={time}: {e}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return None
         
         # Verify file is ready before attempting to read
@@ -585,6 +591,7 @@ def generate_tile_rgba(x: int, y: int, z: int, band: str, time: str) -> Optional
                 return rgba
                 
         except Exception as e:
+            import traceback
             error_str = str(e).lower()
             
             # Detect specific GDAL decoding errors that indicate corrupted/incomplete files
@@ -595,15 +602,18 @@ def generate_tile_rgba(x: int, y: int, z: int, band: str, time: str) -> Optional
             
             if is_decode_error:
                 logger.warning(f"GDAL decode error for {time}/{band} (attempt {attempt + 1}/{max_retries}): {e}")
+                logger.warning(f"Traceback: {traceback.format_exc()}")
                 # Longer delay for decode errors - file might still be uploading
                 import time as time_module
                 time_module.sleep(retry_delay * 2)
             elif attempt < max_retries - 1:
                 logger.warning(f"Error generating tile {z}/{x}/{y} band={band} time={time}, retrying ({attempt + 1}/{max_retries}): {e}")
+                logger.warning(f"Traceback: {traceback.format_exc()}")
                 import time as time_module
                 time_module.sleep(retry_delay)
             else:
                 logger.error(f"Error generating tile {z}/{x}/{y} band={band} time={time}: {e}")
+                logger.error(f"Traceback: {traceback.format_exc()}")
                 return None
     
     return None
