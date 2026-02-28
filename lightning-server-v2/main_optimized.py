@@ -487,6 +487,60 @@ async def debug_gcs():
     return result
 
 
+@app.get("/debug/read")
+async def debug_read(
+    band: str = Query("radar"),
+    time: str = Query("202602281300")
+):
+    """Debug COG reading directly."""
+    import traceback
+    import rasterio
+    from rio_tiler.io import COGReader
+    
+    result = {
+        "requested": {"band": band, "time": time},
+    }
+    
+    try:
+        url = get_cog_url(time, band)
+        result["url"] = url
+        
+        # Check file exists
+        if not verify_cog_file_ready(time, band):
+            result["error"] = "File not ready"
+            return result
+        
+        result["file_verified"] = True
+        
+        # Try to open with rasterio directly first
+        result["rasterio_open"] = "attempting..."
+        with rasterio.open(url) as cog:
+            result["rasterio_open"] = "success"
+            result["cog_bounds"] = list(cog.bounds)
+            result["cog_size"] = [cog.width, cog.height]
+            result["cog_driver"] = cog.driver
+            result["cog_count"] = cog.count
+            
+        # Try with COGReader
+        result["cogreader_open"] = "attempting..."
+        with COGReader(url) as cog:
+            result["cogreader_open"] = "success"
+            result["cog_nodata"] = cog.nodata
+            result["cog_bounds"] = list(cog.bounds) if cog.bounds else None
+            
+            # Try to read a small part
+            result["cog_part"] = "attempting..."
+            part = cog.part((-10, 33.8, 33, 59.6), width=100, height=100, indexes=(1,))
+            result["cog_part"] = "success"
+            result["cog_part_shape"] = part.data[0].shape
+        
+    except Exception as e:
+        result["error"] = str(e)
+        result["traceback"] = traceback.format_exc()
+    
+    return result
+
+
 @app.get("/tiles/{z}/{x}/{y}.png")
 def get_tile_png(
     z: int,
