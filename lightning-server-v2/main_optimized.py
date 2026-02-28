@@ -251,6 +251,65 @@ def get_cog_url(timestamp: str, band: str) -> str:
     return f"/vsigs/{_gcs_bucket_name}/forecasts/{date_folder}/forecast_{timestamp}_{band}.tiff"
 
 
+def verify_cog_file_ready(timestamp: str, band: str, max_retries: int = 3, retry_delay: float = 1.0) -> bool:
+    """
+    Verify that a COG file exists and is ready to be read.
+    This helps avoid GDAL "decoding errors" caused by reading incomplete files.
+    
+    Returns True if file appears ready, False otherwise.
+    """
+    import time
+    global _gcs_bucket_name
+    
+    if _gcs_bucket_name is None:
+        get_gcs_client()
+    
+    date_folder = f"{timestamp[:4]}-{timestamp[4:6]}-{timestamp[6:8]}"
+    blob_name = f"forecasts/{date_folder}/forecast_{timestamp}_{band}.tiff"
+    
+    storage_client, bucket_name = get_gcs_client()
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(blob_name)
+    
+    for attempt in range(max_retries):
+        try:
+            # Check if blob exists and is not being composed
+            if not blob.exists():
+                logger.warning(f"File not found: {blob_name} (attempt {attempt + 1}/{max_retries})")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                continue
+            
+            # Get blob metadata to check if upload is complete
+            blob.reload()
+            metadata = blob.metadata or {}
+            
+            # Check for custom status flag set by uploader (if used)
+            if metadata.get('upload_status') == 'incomplete':
+                logger.warning(f"File marked as incomplete: {blob_name}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                continue
+            
+            # Check file size is reasonable (at least some bytes)
+            size = blob.size
+            if size < 1000:  # Less than 1KB is suspicious
+                logger.warning(f"File too small ({size} bytes): {blob_name}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                continue
+            
+            logger.debug(f"File verified ready: {blob_name} ({size} bytes)")
+            return True
+            
+        except Exception as e:
+            logger.warning(f"Error verifying file {blob_name}: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay)
+    
+    return False
+
+
 # Custom colormap for lightning (yellow -> red)
 LIGHTNING_CMAP = {
     0: (255, 255, 0, 150),  # Yellow
@@ -463,6 +522,18 @@ def generate_tile_rgba(x: int, y: int, z: int, band: str, time: str) -> Optional
             logger.error(f"Failed to get COG URL for tile {z}/{x}/{y} band={band} time={time}: {e}")
             return None
         
+        # Verify file is ready before attempting to read
+        # This prevents GDAL decoding errors from incomplete files
+        if not verify_cog_file_ready(time, band):
+            if attempt < max_retries - 1:
+                logger.warning(f"File not ready for {time}/{band}, retrying ({attempt + 1}/{max_retries})")
+                import time as time_module
+                time_module.sleep(retry_delay)
+                continue
+            else:
+                logger.error(f"File not available after {max_retries} attempts: {time}/{band}")
+                return None
+        
         try:
             with COGReader(url) as cog:
                 tile = cog.tile(x, y, z, tilesize=256, indexes=(1,))
@@ -514,7 +585,20 @@ def generate_tile_rgba(x: int, y: int, z: int, band: str, time: str) -> Optional
                 return rgba
                 
         except Exception as e:
-            if attempt < max_retries - 1:
+            error_str = str(e).lower()
+            
+            # Detect specific GDAL decoding errors that indicate corrupted/incomplete files
+            is_decode_error = any(keyword in error_str for keyword in [
+                'zipdecode', 'decoding error', 'tiffreadencodedtile', 
+                'ireadblock', 'decode failed', 'corrupt', 'incomplete'
+            ])
+            
+            if is_decode_error:
+                logger.warning(f"GDAL decode error for {time}/{band} (attempt {attempt + 1}/{max_retries}): {e}")
+                # Longer delay for decode errors - file might still be uploading
+                import time as time_module
+                time_module.sleep(retry_delay * 2)
+            elif attempt < max_retries - 1:
                 logger.warning(f"Error generating tile {z}/{x}/{y} band={band} time={time}, retrying ({attempt + 1}/{max_retries}): {e}")
                 import time as time_module
                 time_module.sleep(retry_delay)
@@ -597,6 +681,18 @@ async def get_bounds(
             "error": f"Failed to get COG URL: {str(e)}"
         })
 
+    # Check if file is ready before attempting to read
+    if not verify_cog_file_ready(time, band):
+        return JSONResponse({
+            "url": url,
+            "bounds": default_bounds,
+            "crs": "EPSG:4326",
+            "size": None,
+            "nodata": None,
+            "overviews": [],
+            "error": "File not ready or still uploading"
+        })
+
     try:
         with rasterio.open(url) as cog:
             bounds = cog.bounds
@@ -667,6 +763,10 @@ async def get_info(
 
     url = get_cog_url(time, band)
 
+    # Check if file is ready before attempting to read
+    if not verify_cog_file_ready(time, band):
+        raise HTTPException(status_code=404, detail="File not ready or still uploading")
+
     try:
         with rasterio.open(url) as cog:
             import math
@@ -731,6 +831,16 @@ async def get_point_forecast(
     results = []
     for ts in timestamps[-18:]:  # Last 18 timesteps
         timestamp = ts["timestamp"]
+        
+        # Check if file is ready before reading
+        if not verify_cog_file_ready(timestamp, band):
+            results.append({
+                "timestamp": timestamp,
+                "value": None,
+                "error": "File not ready"
+            })
+            continue
+        
         try:
             url = get_cog_url(timestamp, band)
             with rasterio.open(url) as cog:
@@ -800,6 +910,10 @@ async def get_preview(
     except Exception as e:
         logger.error(f"Failed to generate URL: {time}/{band} - {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to generate URL: {str(e)}")
+    
+    # Check if file is ready before attempting to read
+    if not verify_cog_file_ready(time, band):
+        raise HTTPException(status_code=404, detail="File not ready or still uploading")
     
     try:
         with COGReader(url) as cog:
