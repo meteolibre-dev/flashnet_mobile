@@ -669,6 +669,7 @@ async def debug_read(
     return result
 
 
+@app.get("/tiles/{z}/{x}/{y}.png")
 def get_tile_png(
     z: int,
     x: int,
