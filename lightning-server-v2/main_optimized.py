@@ -794,8 +794,9 @@ def generate_tile_rgba(x: int, y: int, z: int, band: str, time: str) -> Optional
                     if band in PRECOMPUTED_COLORMAPS:
                         cmap = PRECOMPUTED_COLORMAPS[band]
                         normalized = data.astype(float) / 255.0
-                        # Use vectorized lookup for better performance
-                        rgba = cmap[normalized].astype(np.uint8)
+                        # Convert float indices (0.0-1.0) to integer indices (0-255)
+                        indices = (normalized * 255).astype(np.uint8)
+                        rgba = cmap[indices]
                     else:
                         # Fallback to dynamic colormap if not pre-computed
                         from matplotlib import cm
