@@ -693,7 +693,7 @@ def get_tile_png(
             content=buffer.getvalue(),
             media_type="image/png",
             headers={
-                "Cache-Control": "public, max-age=3600",  # 1 hour cache
+                "Cache-Control": "public, max-age=600",  # 10 min cache
                 "ETag": f'"{md5(f"{z}/{x}/{y}/{band}/{time}".encode()).hexdigest()}"'
             }
         )
@@ -724,7 +724,7 @@ def get_tile_png(
         content=buffer.getvalue(),
         media_type="image/png",
         headers={
-            "Cache-Control": "public, max-age=3600",  # 1 hour cache
+            "Cache-Control": "public, max-age=600",  # 10 min cache
             "ETag": f'"{tile_hash}"',
             "X-Cache": "MISS"  # Indicate cache miss for debugging
         }
