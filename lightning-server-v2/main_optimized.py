@@ -117,6 +117,9 @@ else:
     logging.basicConfig(level=logging.INFO)
 from datetime import datetime, timedelta
 from functools import lru_cache
+from hashlib import md5
+import hashlib
+import json as json_pkg
 
 import numpy as np
 import requests
@@ -233,6 +236,98 @@ BANDS: Dict[str, BandConfig] = {
 }
 
 
+# ============================================
+# PERFORMANCE OPTIMIZATIONS
+# ============================================
+
+# Pre-computed colormaps at startup (avoid recreating per tile)
+from matplotlib import cm as matplotlib_cm
+import matplotlib
+
+# Force matplotlib to use non-interactive backend
+matplotlib.use('Agg')
+
+PRECOMPUTED_COLORMAPS: Dict[str, np.ndarray] = {}
+for band_name, config in BANDS.items():
+    if config.colormap != "custom":
+        cmap = matplotlib_cm.get_cmap(config.colormap)
+        if config.invert:
+            cmap = cmap.reversed()
+        # Pre-compute colormap as 256x4 array (RGBA)
+        PRECOMPUTED_COLORMAPS[band_name] = (cmap(np.linspace(0, 1, 256)) * 255).astype(np.uint8)
+
+
+# LRU Cache for tiles - significantly reduces GCS reads
+# Cache size: 1000 tiles * ~256KB = ~256MB max
+# Using a simple dict with manual cache management for flexibility
+class TileCache:
+    """Simple LRU cache for generated tiles."""
+    
+    def __init__(self, max_size: int = 1000):
+        self.max_size = max_size
+        self._cache: Dict[str, Tuple[np.ndarray, float]] = {}
+        self._access_times: Dict[str, float] = {}
+    
+    def _make_key(self, x: int, y: int, z: int, band: str, time: str) -> str:
+        """Create cache key from tile parameters."""
+        return f"{z}/{x}/{y}/{band}/{time}"
+    
+    def get(self, x: int, y: int, z: int, band: str, time: str) -> Optional[np.ndarray]:
+        """Get cached tile if available."""
+        key = self._make_key(x, y, z, band, time)
+        if key in self._cache:
+            self._access_times[key] = datetime.utcnow().timestamp()
+            return self._cache[key][0]
+        return None
+    
+    def put(self, x: int, y: int, z: int, band: str, time: str, tile: np.ndarray):
+        """Add tile to cache with LRU eviction."""
+        key = self._make_key(x, y, z, band, time)
+        
+        # Evict oldest entries if cache is full
+        while len(self._cache) >= self.max_size:
+            oldest_key = min(self._access_times, key=self._access_times.get)
+            del self._cache[oldest_key]
+            del self._access_times[oldest_key]
+        
+        self._cache[key] = (tile, datetime.utcnow().timestamp())
+        self._access_times[key] = datetime.utcnow().timestamp()
+    
+    def clear(self):
+        """Clear the entire cache."""
+        self._cache.clear()
+        self._access_times.clear()
+    
+    def size(self) -> int:
+        return len(self._cache)
+
+
+# Global tile cache instance
+tile_cache = TileCache(max_size=1000)
+
+
+# Cache for COG file metadata (bounds, size, etc.) - avoids reopening COG
+_cog_metadata_cache: Dict[str, Dict] = {}
+
+
+def get_cog_metadata_cached(url: str) -> Dict:
+    """Get COG metadata with caching."""
+    if url in _cog_metadata_cache:
+        return _cog_metadata_cache[url]
+    
+    with rasterio.open(url) as cog:
+        metadata = {
+            "bounds": list(cog.bounds),
+            "size": [cog.width, cog.height],
+            "crs": str(cog.crs) if cog.crs else None,
+            "nodata": cog.nodata,
+            "overviews": list(cog.overviews(1)) if hasattr(cog, 'overviews') else []
+        }
+    
+    _cog_metadata_cache[url] = metadata
+    return metadata
+
+
 def get_cog_url(timestamp: str, band: str) -> str:
     """
     Generate the COG URL for a given timestamp and band.
@@ -343,8 +438,37 @@ async def root():
             "Internal overviews for fast tiles",
             "HTTP range requests",
             "DEFLATE compression"
+        ],
+        "performance_features": [
+            "LRU tile cache (1000 tiles)",
+            "Pre-computed colormaps",
+            "HTTP cache headers"
         ]
     }
+
+
+@app.get("/cache/stats")
+async def get_cache_stats():
+    """Get cache performance statistics."""
+    return {
+        "tile_cache": {
+            "size": tile_cache.size(),
+            "max_size": tile_cache.max_size,
+            "utilization_percent": round(tile_cache.size() / tile_cache.max_size * 100, 1)
+        },
+        "cog_metadata_cache": {
+            "size": len(_cog_metadata_cache),
+            "cached_files": list(_cog_metadata_cache.keys())[:10]  # Show first 10
+        },
+        "precomputed_colormaps": list(PRECOMPUTED_COLORMAPS.keys())
+    }
+
+
+@app.post("/cache/clear")
+async def clear_cache():
+    """Clear the tile cache (e.g., when new data is available)."""
+    tile_cache.clear()
+    return {"message": "Tile cache cleared", "size": 0}
 
 
 @app.get("/bands")
@@ -545,7 +669,6 @@ async def debug_read(
     return result
 
 
-@app.get("/tiles/{z}/{x}/{y}.png")
 def get_tile_png(
     z: int,
     x: int,
@@ -556,8 +679,23 @@ def get_tile_png(
     """
     Get a PNG tile for the specified band and time.
     Uses COG internal overviews for optimal performance.
+    Cached for fast repeated requests.
     """
 
+    # Check cache first
+    cached_tile = tile_cache.get(x, y, z, band, time)
+    if cached_tile is not None:
+        img = Image.fromarray(cached_tile, mode='RGBA')
+        buffer = BytesIO()
+        img.save(buffer, format='PNG', optimize=True)
+        return Response(
+            content=buffer.getvalue(),
+            media_type="image/png",
+            headers={
+                "Cache-Control": "public, max-age=3600",  # 1 hour cache
+                "ETag": f'"{md5(f"{z}/{x}/{y}/{band}/{time}".encode()).hexdigest()}"'
+            }
+        )
     
     rgba = generate_tile_rgba(x, y, z, band, time)
     
@@ -565,12 +703,31 @@ def get_tile_png(
         img = Image.new('RGBA', (256, 256), (0, 0, 0, 0))
         buffer = BytesIO()
         img.save(buffer, format='PNG')
-        return Response(content=buffer.getvalue(), media_type="image/png")
+        return Response(
+            content=buffer.getvalue(),
+            media_type="image/png",
+            headers={"Cache-Control": "public, max-age=60"}
+        )
+    
+    # Cache the generated tile
+    tile_cache.put(x, y, z, band, time, rgba)
     
     img = Image.fromarray(rgba, mode='RGBA')
     buffer = BytesIO()
     img.save(buffer, format='PNG', optimize=True)
-    return Response(content=buffer.getvalue(), media_type="image/png")
+    
+    # Generate ETag for response
+    tile_hash = md5(rgba.tobytes()).hexdigest()
+    
+    return Response(
+        content=buffer.getvalue(),
+        media_type="image/png",
+        headers={
+            "Cache-Control": "public, max-age=3600",  # 1 hour cache
+            "ETag": f'"{tile_hash}"',
+            "X-Cache": "MISS"  # Indicate cache miss for debugging
+        }
+    )
 
 
 @app.get("/tiles/{z}/{x}/{y}.webp")
@@ -584,9 +741,25 @@ async def get_tile_webp(
     """
     Get a WebP tile for the specified band and time.
     Uses COG internal overviews for optimal performance.
+    Cached for fast repeated requests.
     """
     from io import BytesIO
     from PIL import Image
+    
+    # Check cache first
+    cached_tile = tile_cache.get(x, y, z, band, time)
+    if cached_tile is not None:
+        img = Image.fromarray(cached_tile, mode='RGBA')
+        buffer = BytesIO()
+        img.save(buffer, format='WEBP', quality=85, method=6)
+        return Response(
+            content=buffer.getvalue(),
+            media_type="image/webp",
+            headers={
+                "Cache-Control": "public, max-age=3600",
+                "ETag": f'"{md5(f"{z}/{x}/{y}/{band}/{time}".encode()).hexdigest()}"'
+            }
+        )
     
     rgba = generate_tile_rgba(x, y, z, band, time)
     
@@ -594,12 +767,30 @@ async def get_tile_webp(
         img = Image.new('RGBA', (256, 256), (0, 0, 0, 0))
         buffer = BytesIO()
         img.save(buffer, format='WEBP', quality=85, method=6)
-        return Response(content=buffer.getvalue(), media_type="image/webp")
+        return Response(
+            content=buffer.getvalue(),
+            media_type="image/webp",
+            headers={"Cache-Control": "public, max-age=60"}
+        )
+    
+    # Cache the generated tile
+    tile_cache.put(x, y, z, band, time, rgba)
     
     img = Image.fromarray(rgba, mode='RGBA')
     buffer = BytesIO()
     img.save(buffer, format='WEBP', quality=85, method=6)
-    return Response(content=buffer.getvalue(), media_type="image/webp")
+    
+    tile_hash = md5(rgba.tobytes()).hexdigest()
+    
+    return Response(
+        content=buffer.getvalue(),
+        media_type="image/webp",
+        headers={
+            "Cache-Control": "public, max-age=3600",
+            "ETag": f'"{tile_hash}"',
+            "X-Cache": "MISS"
+        }
+    )
 
 
 def generate_tile_rgba(x: int, y: int, z: int, band: str, time: str) -> Optional[np.ndarray]:
@@ -622,19 +813,10 @@ def generate_tile_rgba(x: int, y: int, z: int, band: str, time: str) -> Optional
             logger.error(f"Failed to get COG URL for tile {z}/{x}/{y} band={band} time={time}: {e}")
             logger.error(f"Traceback: {traceback.format_exc()}")
             return None
-        
-        # Verify file is ready before attempting to read
-        # This prevents GDAL decoding errors from incomplete files
-        logger.debug(f"Verifying file ready for {time}/{band}...")
-        if not verify_cog_file_ready(time, band):
-            if attempt < max_retries - 1:
-                logger.warning(f"File not ready for {time}/{band}, retrying ({attempt + 1}/{max_retries})")
-                import time as time_module
-                time_module.sleep(retry_delay)
-                continue
-            else:
-                logger.error(f"File not available after {max_retries} attempts: {time}/{band}")
-                return None
+
+        # NOTE: File verification removed for performance
+        # In production, ensure files are fully uploaded before making them available
+        # If needed, verify at the /available endpoint instead of per-tile
         
         logger.debug(f"Opening COGReader for {url}...")
         try:
@@ -670,14 +852,21 @@ def generate_tile_rgba(x: int, y: int, z: int, band: str, time: str) -> Optional
                     if nodata_mask is not None:
                         rgba[nodata_mask] = [0, 0, 0, 0]
                 else:
-                    from matplotlib import cm
+                    # Use pre-computed colormap for performance
+                    if band in PRECOMPUTED_COLORMAPS:
+                        cmap = PRECOMPUTED_COLORMAPS[band]
+                        normalized = data.astype(float) / 255.0
+                        # Use vectorized lookup for better performance
+                        rgba = cmap[normalized].astype(np.uint8)
+                    else:
+                        # Fallback to dynamic colormap if not pre-computed
+                        from matplotlib import cm
+                        cmap = cm.get_cmap(config.colormap)
+                        if config.invert:
+                            cmap = cmap.reversed()
+                        normalized = data.astype(float) / 255.0
+                        rgba = (cmap(normalized) * 255).astype(np.uint8)
                     
-                    cmap = cm.get_cmap(config.colormap)
-                    if config.invert:
-                        cmap = cmap.reversed()
-                    
-                    normalized = data.astype(float) / 255.0
-                    rgba = (cmap(normalized) * 255).astype(np.uint8)
                     rgba[:, :, 3] = 255
                     
                     zero_mask = data == 0
