@@ -731,69 +731,6 @@ def get_tile_png(
     )
 
 
-@app.get("/tiles/{z}/{x}/{y}.webp")
-async def get_tile_webp(
-    z: int,
-    x: int,
-    y: int,
-    band: str = Query(..., description="Band: lightning, sat_ch0, sat_ch1, ..."),
-    time: str = Query(..., description="Timestamp: YYYYMMDDHHMM")
-):
-    """
-    Get a WebP tile for the specified band and time.
-    Uses COG internal overviews for optimal performance.
-    Cached for fast repeated requests.
-    """
-    from io import BytesIO
-    from PIL import Image
-    
-    # Check cache first
-    cached_tile = tile_cache.get(x, y, z, band, time)
-    if cached_tile is not None:
-        img = Image.fromarray(cached_tile, mode='RGBA')
-        buffer = BytesIO()
-        img.save(buffer, format='WEBP', quality=85, method=6)
-        return Response(
-            content=buffer.getvalue(),
-            media_type="image/webp",
-            headers={
-                "Cache-Control": "public, max-age=3600",
-                "ETag": f'"{md5(f"{z}/{x}/{y}/{band}/{time}".encode()).hexdigest()}"'
-            }
-        )
-    
-    rgba = generate_tile_rgba(x, y, z, band, time)
-    
-    if rgba is None:
-        img = Image.new('RGBA', (256, 256), (0, 0, 0, 0))
-        buffer = BytesIO()
-        img.save(buffer, format='WEBP', quality=85, method=6)
-        return Response(
-            content=buffer.getvalue(),
-            media_type="image/webp",
-            headers={"Cache-Control": "public, max-age=60"}
-        )
-    
-    # Cache the generated tile
-    tile_cache.put(x, y, z, band, time, rgba)
-    
-    img = Image.fromarray(rgba, mode='RGBA')
-    buffer = BytesIO()
-    img.save(buffer, format='WEBP', quality=85, method=6)
-    
-    tile_hash = md5(rgba.tobytes()).hexdigest()
-    
-    return Response(
-        content=buffer.getvalue(),
-        media_type="image/webp",
-        headers={
-            "Cache-Control": "public, max-age=3600",
-            "ETag": f'"{tile_hash}"',
-            "X-Cache": "MISS"
-        }
-    )
-
-
 def generate_tile_rgba(x: int, y: int, z: int, band: str, time: str) -> Optional[np.ndarray]:
     """Generate RGBA array for a single tile. Returns None on error."""
     if band not in BANDS:
