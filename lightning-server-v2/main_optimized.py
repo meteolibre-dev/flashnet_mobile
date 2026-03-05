@@ -116,7 +116,6 @@ if os.getenv("DEBUG"):
 else:
     logging.basicConfig(level=logging.INFO)
 from datetime import datetime, timedelta
-from functools import lru_cache
 from hashlib import md5
 import hashlib
 import json as json_pkg
@@ -257,75 +256,7 @@ for band_name, config in BANDS.items():
         PRECOMPUTED_COLORMAPS[band_name] = (cmap(np.linspace(0, 1, 256)) * 255).astype(np.uint8)
 
 
-# LRU Cache for tiles - significantly reduces GCS reads
-# Cache size: 1000 tiles * ~256KB = ~256MB max
-# Using a simple dict with manual cache management for flexibility
-class TileCache:
-    """Simple LRU cache for generated tiles."""
-    
-    def __init__(self, max_size: int = 1000):
-        self.max_size = max_size
-        self._cache: Dict[str, Tuple[np.ndarray, float]] = {}
-        self._access_times: Dict[str, float] = {}
-    
-    def _make_key(self, x: int, y: int, z: int, band: str, time: str) -> str:
-        """Create cache key from tile parameters."""
-        return f"{z}/{x}/{y}/{band}/{time}"
-    
-    def get(self, x: int, y: int, z: int, band: str, time: str) -> Optional[np.ndarray]:
-        """Get cached tile if available."""
-        key = self._make_key(x, y, z, band, time)
-        if key in self._cache:
-            self._access_times[key] = datetime.utcnow().timestamp()
-            return self._cache[key][0]
-        return None
-    
-    def put(self, x: int, y: int, z: int, band: str, time: str, tile: np.ndarray):
-        """Add tile to cache with LRU eviction."""
-        key = self._make_key(x, y, z, band, time)
-        
-        # Evict oldest entries if cache is full
-        while len(self._cache) >= self.max_size:
-            oldest_key = min(self._access_times, key=self._access_times.get)
-            del self._cache[oldest_key]
-            del self._access_times[oldest_key]
-        
-        self._cache[key] = (tile, datetime.utcnow().timestamp())
-        self._access_times[key] = datetime.utcnow().timestamp()
-    
-    def clear(self):
-        """Clear the entire cache."""
-        self._cache.clear()
-        self._access_times.clear()
-    
-    def size(self) -> int:
-        return len(self._cache)
 
-
-# Global tile cache instance
-tile_cache = TileCache(max_size=1000)
-
-
-# Cache for COG file metadata (bounds, size, etc.) - avoids reopening COG
-_cog_metadata_cache: Dict[str, Dict] = {}
-
-
-def get_cog_metadata_cached(url: str) -> Dict:
-    """Get COG metadata with caching."""
-    if url in _cog_metadata_cache:
-        return _cog_metadata_cache[url]
-    
-    with rasterio.open(url) as cog:
-        metadata = {
-            "bounds": list(cog.bounds),
-            "size": [cog.width, cog.height],
-            "crs": str(cog.crs) if cog.crs else None,
-            "nodata": cog.nodata,
-            "overviews": list(cog.overviews(1)) if hasattr(cog, 'overviews') else []
-        }
-    
-    _cog_metadata_cache[url] = metadata
-    return metadata
 
 
 def get_cog_url(timestamp: str, band: str) -> str:
@@ -440,35 +371,11 @@ async def root():
             "DEFLATE compression"
         ],
         "performance_features": [
-            "LRU tile cache (1000 tiles)",
+            "COG internal overviews",
             "Pre-computed colormaps",
             "HTTP cache headers"
         ]
     }
-
-
-@app.get("/cache/stats")
-async def get_cache_stats():
-    """Get cache performance statistics."""
-    return {
-        "tile_cache": {
-            "size": tile_cache.size(),
-            "max_size": tile_cache.max_size,
-            "utilization_percent": round(tile_cache.size() / tile_cache.max_size * 100, 1)
-        },
-        "cog_metadata_cache": {
-            "size": len(_cog_metadata_cache),
-            "cached_files": list(_cog_metadata_cache.keys())[:10]  # Show first 10
-        },
-        "precomputed_colormaps": list(PRECOMPUTED_COLORMAPS.keys())
-    }
-
-
-@app.post("/cache/clear")
-async def clear_cache():
-    """Clear the tile cache (e.g., when new data is available)."""
-    tile_cache.clear()
-    return {"message": "Tile cache cleared", "size": 0}
 
 
 @app.get("/bands")
@@ -680,24 +587,8 @@ def get_tile_png(
     """
     Get a PNG tile for the specified band and time.
     Uses COG internal overviews for optimal performance.
-    Cached for fast repeated requests.
     """
 
-    # Check cache first
-    cached_tile = tile_cache.get(x, y, z, band, time)
-    if cached_tile is not None:
-        img = Image.fromarray(cached_tile, mode='RGBA')
-        buffer = BytesIO()
-        img.save(buffer, format='PNG', optimize=True)
-        return Response(
-            content=buffer.getvalue(),
-            media_type="image/png",
-            headers={
-                "Cache-Control": "public, max-age=600",  # 10 min cache
-                "ETag": f'"{md5(f"{z}/{x}/{y}/{band}/{time}".encode()).hexdigest()}"'
-            }
-        )
-    
     rgba = generate_tile_rgba(x, y, z, band, time)
     
     if rgba is None:
@@ -710,9 +601,6 @@ def get_tile_png(
             headers={"Cache-Control": "public, max-age=60"}
         )
     
-    # Cache the generated tile
-    tile_cache.put(x, y, z, band, time, rgba)
-    
     img = Image.fromarray(rgba, mode='RGBA')
     buffer = BytesIO()
     img.save(buffer, format='PNG', optimize=True)
@@ -724,9 +612,8 @@ def get_tile_png(
         content=buffer.getvalue(),
         media_type="image/png",
         headers={
-            "Cache-Control": "public, max-age=600",  # 10 min cache
-            "ETag": f'"{tile_hash}"',
-            "X-Cache": "MISS"  # Indicate cache miss for debugging
+            "Cache-Control": "public, max-age=600",  # 10 min browser cache
+            "ETag": f'"{tile_hash}"'
         }
     )
 
