@@ -1,0 +1,45 @@
+name: flashnet
+description: "FlashNet - Lightning & Weather Forecast App"
+publish_to: 'none'
+
+version: 1.0.0+119
+
+environment:
+  sdk: ^3.8.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  mapbox_maps_flutter: ^2.4.0
+  geolocator: ^13.0.2
+  permission_handler: ^11.3.1
+  http: ^1.2.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+  flutter_launcher_icons: ^0.14.3
+  flutter_native_splash: ^2.4.6
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/icon.png"
+  adaptive_icon_background: "#000000"
+  adaptive_icon_foreground: "assets/icon.png"
+
+flutter_native_splash:
+  color: "#000000"
+  fullscreen: true
+  android: true
+  ios: true
+  android_12:
+    color: "#000000"
+    icon_background_color: "#000000"
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/
