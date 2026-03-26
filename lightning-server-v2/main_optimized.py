@@ -425,9 +425,9 @@ async def get_available_timesteps(
         timestamp_bands: Dict[str, Set[str]] = {}
         now = datetime.utcnow()
 
-        # Scan for each day and each band
-        for i in range(days):
-            d = now - timedelta(days=i)
+        # Scan for each day and each band (1 day back + days forward to catch next-day forecasts)
+        for i in range(-1, days):
+            d = now + timedelta(days=i)
             date_folder = d.strftime("%Y-%m-%d")
             prefix = f"forecasts/{date_folder}/"
 

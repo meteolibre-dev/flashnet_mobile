@@ -40,7 +40,7 @@ class _ForecastScreenState extends State<ForecastScreen> {
   String? _activeLayerId;
 
   // Channel selection
-  Channel _selectedChannel = primaryChannels[0];
+  Channel _selectedChannel = primaryChannels[1];
   bool _showSecondaryMenu = false;
 
   // Location
@@ -59,7 +59,7 @@ class _ForecastScreenState extends State<ForecastScreen> {
     super.initState();
     _loadTimesteps();
     _requestLocation();
-    Future.delayed(const Duration(milliseconds: 2000), () {
+    Future.delayed(const Duration(milliseconds: 3000), () {
       if (mounted) setState(() => _showSplash = false);
     });
   }
@@ -366,7 +366,8 @@ class _ForecastScreenState extends State<ForecastScreen> {
             onStyleLoadedListener: _onStyleLoaded,
           ),
 
-          // ── Top controls ──
+          // ── Top controls (hidden during splash) ──
+          if (!_showSplash)
           SafeArea(
             child: Align(
               alignment: Alignment.topRight,
@@ -400,7 +401,7 @@ class _ForecastScreenState extends State<ForecastScreen> {
           ),
 
           // ── Loading indicator ──
-          if (_isLoadingLayer)
+          if (!_showSplash && _isLoadingLayer)
             Positioned(
               top: MediaQuery.of(context).padding.top + 12,
               left: 12,
@@ -431,7 +432,7 @@ class _ForecastScreenState extends State<ForecastScreen> {
             ),
 
           // ── Left badge ──
-          if (_timesteps.isNotEmpty)
+          if (!_showSplash && _timesteps.isNotEmpty)
             Positioned(
               left: 0,
               top: 0,
@@ -468,6 +469,7 @@ class _ForecastScreenState extends State<ForecastScreen> {
             ),
 
           // ── Right badge ──
+          if (!_showSplash)
           Positioned(
             right: 0,
             top: 0,
@@ -508,12 +510,13 @@ class _ForecastScreenState extends State<ForecastScreen> {
           ),
 
           // ── Bottom controls ──
+          if (!_showSplash)
           Positioned(
             left: 0,
             right: 0,
             bottom: 24 + MediaQuery.of(context).padding.bottom,
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
+              padding: const EdgeInsets.symmetric(horizontal: 8),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -587,12 +590,15 @@ class _ForecastScreenState extends State<ForecastScreen> {
           // ── In-app splash ──
           if (_showSplash)
             Positioned.fill(
-              child: AnimatedOpacity(
-                opacity: _showSplash ? 1.0 : 0.0,
-                duration: const Duration(milliseconds: 400),
-                child: Image.asset(
-                  'assets/splash.png',
-                  fit: BoxFit.cover,
+              child: ColoredBox(
+                color: Colors.black,
+                child: AnimatedOpacity(
+                  opacity: _showSplash ? 1.0 : 0.0,
+                  duration: const Duration(milliseconds: 400),
+                  child: Image.asset(
+                    'assets/splash.png',
+                    fit: BoxFit.cover,
+                  ),
                 ),
               ),
             ),
@@ -696,8 +702,8 @@ class _ForecastScreenState extends State<ForecastScreen> {
             thumbColor: const Color(0xFF14b8a6),
             overlayColor: const Color(0x2914b8a6),
             thumbShape:
-                const RoundSliderThumbShape(enabledThumbRadius: 8),
-            trackHeight: 4,
+                const RoundSliderThumbShape(enabledThumbRadius: 12),
+            trackHeight: 6,
           ),
           child: Slider(
             min: 0,
@@ -717,6 +723,12 @@ class _ForecastScreenState extends State<ForecastScreen> {
     );
   }
 
+  Color _channelSelectedColor(Channel ch) {
+    if (ch.id == 'lightning') return const Color(0xFFEAB308); // yellow
+    if (ch.id == 'radar') return const Color(0xFF2563EB);     // blue
+    return const Color(0xFF14b8a6);                           // teal fallback
+  }
+
   Widget _channelPill(Channel ch, {required VoidCallback onTap}) {
     final isSelected = _selectedChannel.id == ch.id;
     final isAvailable = _isChannelAvailable(ch);
@@ -726,20 +738,24 @@ class _ForecastScreenState extends State<ForecastScreen> {
         duration: const Duration(milliseconds: 150),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
         decoration: BoxDecoration(
-          color: isSelected
-              ? const Color(0xFF14b8a6)
-              : Colors.black,
+          color: isSelected ? _channelSelectedColor(ch) : Colors.black,
           borderRadius: BorderRadius.circular(20),
         ),
-        child: Text(
-          ch.label,
-          style: TextStyle(
-            color: isAvailable ? Colors.white : Colors.white38,
-            fontSize: 13,
-            fontWeight: FontWeight.w500,
-          ),
-        ),
+        child: _channelPillContent(ch, isAvailable),
       ),
+    );
+  }
+
+  Widget _channelPillContent(Channel ch, bool isAvailable) {
+    final color = isAvailable ? Colors.white : Colors.white38;
+    if (ch.id == 'lightning') {
+      return Icon(Icons.bolt_outlined, color: Colors.white, size: 18);
+    } else if (ch.id == 'radar') {
+      return Icon(Icons.grain, color: Colors.white, size: 18);
+    }
+    return Text(
+      ch.label,
+      style: TextStyle(color: color, fontSize: 13, fontWeight: FontWeight.w500),
     );
   }
 
