@@ -155,7 +155,7 @@ app.add_middleware(
 
 # Environment variables
 # Use gs:// for private buckets (requires GCS credentials), https:// for public buckets
-BUCKET_BASE_URL = os.getenv("BUCKET_BASE_URL", "gs://inference_result/forecasts")
+BUCKET_BASE_URL = os.getenv("BUCKET_BASE_URL", "gs://inference_result_meteolibre_forecast/forecasts")
 PORT = int(os.getenv("PORT", "3001"))
 
 # Region bounds for point queries (matches frontend REGION)
@@ -513,7 +513,7 @@ async def debug_gcs():
     
     # Test reading a small file from GCS
     try:
-        test_url = "/vsigs/inference_result/forecasts/2026-02-28/"
+        test_url = "/vsigs/inference_result_meteolibre_forecast/forecasts/2026-02-28/"
         logger.info(f"Testing GCS access to: {test_url}")
         result["gcs_test"] = "URL generated OK"
     except Exception as e:
@@ -795,7 +795,7 @@ async def get_bounds(
     except Exception as e:
         # COG URL generation failed - return default bounds
         return JSONResponse({
-            "url": f"gs://inference_result/forecasts/{time[:4]}-{time[4:6]}-{time[6:8]}/forecast_{time}_{band}.tiff",
+            "url": f"gs://inference_result_meteolibre_forecast/forecasts/{time[:4]}-{time[4:6]}-{time[6:8]}/forecast_{time}_{band}.tiff",
             "bounds": default_bounds,
             "crs": "EPSG:4326",
             "size": None,
