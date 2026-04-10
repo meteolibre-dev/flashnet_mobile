@@ -70,4 +70,4 @@ jobs:
             --cpu 2 \
             --min-instances 1 \
             --max-instances 4 \
-            --set-env-vars BUCKET_BASE_URL=gs://inference_result/forecasts,GCP_CREDENTIALS_B64=$CREDENTIALS_B64
+            --set-env-vars BUCKET_BASE_URL=gs://inference_result_meteolibre_forecast/forecasts,GCP_CREDENTIALS_B64=$CREDENTIALS_B64
