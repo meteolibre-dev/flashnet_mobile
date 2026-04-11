@@ -170,6 +170,9 @@ REGION = {
 _gcs_client = None
 _gcs_bucket_name = None
 
+# Cache: forecast_timestamp (YYYYMMDDHHMM) → H5 datetime subfolder (e.g. "2026-04-11_08-20")
+_timestamp_to_h5_subfolder: Dict[str, str] = {}
+
 
 def get_gcs_client():
     """Get or create GCS client for bucket listing operations."""
@@ -183,6 +186,38 @@ def get_gcs_client():
             _gcs_bucket_name = BUCKET_BASE_URL.replace("https://storage.googleapis.com/", "").split("/")[0]
 
     return _gcs_client, _gcs_bucket_name
+
+
+def _find_h5_subfolder(timestamp: str) -> Optional[str]:
+    """Find the H5 datetime subfolder for a given forecast timestamp.
+
+    New bucket layout:
+        forecasts/YYYY-MM-DD/{h5_datetime}/forecast_YYYYMMDDHHMM_band.tiff
+
+    Checks the in-memory cache first, then scans GCS if needed.
+    Returns None if no matching subfolder is found (falls back to old flat layout).
+    """
+    if timestamp in _timestamp_to_h5_subfolder:
+        return _timestamp_to_h5_subfolder[timestamp]
+
+    date_folder = f"{timestamp[:4]}-{timestamp[4:6]}-{timestamp[6:8]}"
+    try:
+        storage_client, bucket_name = get_gcs_client()
+        bucket = storage_client.bucket(bucket_name)
+        prefix = f"forecasts/{date_folder}/"
+        for blob in bucket.list_blobs(prefix=prefix):
+            # New path: forecasts/YYYY-MM-DD/h5_subfolder/forecast_YYYYMMDDHHMM_band.tiff
+            match = re.search(
+                r"forecasts/[^/]+/([^/]+)/forecast_(\d{12})_[^.]+\.tiff$", blob.name
+            )
+            if match and match.group(2) == timestamp:
+                subfolder = match.group(1)
+                _timestamp_to_h5_subfolder[timestamp] = subfolder
+                return subfolder
+    except Exception as e:
+        logger.warning(f"Could not scan GCS for h5 subfolder of {timestamp}: {e}")
+
+    return None
 
 
 # Band configuration - matches inference output naming
@@ -280,9 +315,12 @@ def get_cog_url(timestamp: str, band: str) -> str:
     
     # Convert YYYYMMDD to YYYY-MM-DD for bucket path
     date_folder = f"{timestamp[:4]}-{timestamp[4:6]}-{timestamp[6:8]}"
-    
-    # GDAL natively understands /vsigs/ and uses your Google Application Default Credentials
-    # No signed URL generation needed - eliminates 50-200ms latency per tile
+
+    h5_subfolder = _find_h5_subfolder(timestamp)
+    if h5_subfolder:
+        return f"/vsigs/{_gcs_bucket_name}/forecasts/{date_folder}/{h5_subfolder}/forecast_{timestamp}_{band}.tiff"
+
+    # Fallback to flat layout for files uploaded before the subfolder change
     return f"/vsigs/{_gcs_bucket_name}/forecasts/{date_folder}/forecast_{timestamp}_{band}.tiff"
 
 
@@ -300,8 +338,12 @@ def verify_cog_file_ready(timestamp: str, band: str, max_retries: int = 3, retry
         get_gcs_client()
     
     date_folder = f"{timestamp[:4]}-{timestamp[4:6]}-{timestamp[6:8]}"
-    blob_name = f"forecasts/{date_folder}/forecast_{timestamp}_{band}.tiff"
-    
+    h5_subfolder = _find_h5_subfolder(timestamp)
+    if h5_subfolder:
+        blob_name = f"forecasts/{date_folder}/{h5_subfolder}/forecast_{timestamp}_{band}.tiff"
+    else:
+        blob_name = f"forecasts/{date_folder}/forecast_{timestamp}_{band}.tiff"
+
     storage_client, bucket_name = get_gcs_client()
     bucket = storage_client.bucket(bucket_name)
     blob = bucket.blob(blob_name)
@@ -435,16 +477,28 @@ async def get_available_timesteps(
             blobs = bucket.list_blobs(prefix=prefix, max_results=1000)
 
             for blob in blobs:
-                # Extract timestamp and band from filename
-                # Pattern: forecasts/YYYY-MM-DD/forecast_YYYYMMDDHHMM_band.tiff
-                match = re.search(r"forecast_(\d{12})_([^.]+)\.tiff$", blob.name)
-                if match:
-                    ts = match.group(1)
-                    found_band = match.group(2)
+                # Extract timestamp and band from filename.
+                # Supports both layouts:
+                #   New: forecasts/YYYY-MM-DD/h5_subfolder/forecast_YYYYMMDDHHMM_band.tiff
+                #   Old: forecasts/YYYY-MM-DD/forecast_YYYYMMDDHHMM_band.tiff
+                new_match = re.search(
+                    r"forecasts/[^/]+/([^/]+)/forecast_(\d{12})_([^.]+)\.tiff$", blob.name
+                )
+                if new_match:
+                    h5_sub = new_match.group(1)
+                    ts = new_match.group(2)
+                    found_band = new_match.group(3)
+                    _timestamp_to_h5_subfolder[ts] = h5_sub
+                else:
+                    old_match = re.search(r"forecast_(\d{12})_([^.]+)\.tiff$", blob.name)
+                    if not old_match:
+                        continue
+                    ts = old_match.group(1)
+                    found_band = old_match.group(2)
 
-                    if ts not in timestamp_bands:
-                        timestamp_bands[ts] = set()
-                    timestamp_bands[ts].add(found_band)
+                if ts not in timestamp_bands:
+                    timestamp_bands[ts] = set()
+                timestamp_bands[ts].add(found_band)
 
         # Convert to sorted list with datetime info
         timestamps = []
@@ -795,7 +849,7 @@ async def get_bounds(
     except Exception as e:
         # COG URL generation failed - return default bounds
         return JSONResponse({
-            "url": f"gs://inference_result_meteolibre_forecast/forecasts/{time[:4]}-{time[4:6]}-{time[6:8]}/forecast_{time}_{band}.tiff",
+            "url": f"gs://inference_result_meteolibre_forecast/forecasts/{time[:4]}-{time[4:6]}-{time[6:8]}/{_timestamp_to_h5_subfolder.get(time, '')}/forecast_{time}_{band}.tiff".replace("//", "/"),
             "bounds": default_bounds,
             "crs": "EPSG:4326",
             "size": None,
