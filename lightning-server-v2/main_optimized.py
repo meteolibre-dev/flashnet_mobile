@@ -463,60 +463,52 @@ async def get_available_timesteps(
         storage_client, bucket_name = get_gcs_client()
         bucket = storage_client.bucket(bucket_name)
 
-        # Track timestamps and their available bands, grouped by h5 subfolder (run)
-        # subfolder_timestamps: h5_sub -> {ts -> set(bands)}
-        subfolder_timestamps: Dict[str, Dict[str, Set[str]]] = {}
-        # flat layout timestamps (old format, no subfolder)
-        flat_timestamp_bands: Dict[str, Set[str]] = {}
         now = datetime.utcnow()
+        timestamp_bands: Dict[str, Set[str]] = {}
 
-        # Scan for each day and each band (1 day back + days forward to catch next-day forecasts)
+        # Scan for each day in the range (-1 day back + days forward)
         for i in range(-1, days):
             d = now + timedelta(days=i)
             date_folder = d.strftime("%Y-%m-%d")
-            prefix = f"forecasts/{date_folder}/"
+            date_prefix = f"forecasts/{date_folder}/"
 
-            # List blobs with this prefix
-            blobs = bucket.list_blobs(prefix=prefix, max_results=1000)
+            # Step 1: list virtual subdirectories (runs) using delimiter — cheap, no file content
+            # This gives us all h5_subfolder names without enumerating every file.
+            run_subfolders = []
+            iterator = bucket.list_blobs(prefix=date_prefix, delimiter="/")
+            # Exhaust the iterator to populate .prefixes
+            for _ in iterator:
+                pass
+            for prefix in iterator.prefixes:
+                # prefix looks like: forecasts/2026-04-12/2026-04-12_12-50_europe/
+                sub = prefix.rstrip("/").split("/")[-1]
+                run_subfolders.append((sub, prefix))
 
-            for blob in blobs:
-                # Extract timestamp and band from filename.
-                # Supports both layouts:
-                #   New: forecasts/YYYY-MM-DD/h5_subfolder/forecast_YYYYMMDDHHMM_band.tiff
-                #   Old: forecasts/YYYY-MM-DD/forecast_YYYYMMDDHHMM_band.tiff
-                new_match = re.search(
-                    r"forecasts/[^/]+/([^/]+)/forecast_(\d{12})_([^.]+)\.tiff$", blob.name
-                )
-                if new_match:
-                    h5_sub = new_match.group(1)
-                    ts = new_match.group(2)
-                    found_band = new_match.group(3)
-                    _timestamp_to_h5_subfolder[ts] = h5_sub
-                    if h5_sub not in subfolder_timestamps:
-                        subfolder_timestamps[h5_sub] = {}
-                    if ts not in subfolder_timestamps[h5_sub]:
-                        subfolder_timestamps[h5_sub][ts] = set()
-                    subfolder_timestamps[h5_sub][ts].add(found_band)
-                else:
-                    old_match = re.search(r"forecast_(\d{12})_([^.]+)\.tiff$", blob.name)
-                    if not old_match:
+            if run_subfolders:
+                # Step 2: pick only the latest run (lexicographic max on subfolder name)
+                latest_sub, latest_prefix = max(run_subfolders, key=lambda x: x[0])
+                logger.info(f"/available: date={date_folder}, latest subfolder='{latest_sub}'")
+
+                # Step 3: list files only within that run's subfolder — no max_results cap needed
+                for blob in bucket.list_blobs(prefix=latest_prefix):
+                    m = re.search(r"forecast_(\d{12})_([^.]+)\.tiff$", blob.name)
+                    if not m:
                         continue
-                    ts = old_match.group(1)
-                    found_band = old_match.group(2)
-                    if ts not in flat_timestamp_bands:
-                        flat_timestamp_bands[ts] = set()
-                    flat_timestamp_bands[ts].add(found_band)
-
-        # Use only the latest subfolder (run) per day to avoid mixing stale runs.
-        # Subfolder names are YYYY-MM-DD_HH-MM_region so lexicographic max = most recent.
-        timestamp_bands: Dict[str, Set[str]] = {}
-        if subfolder_timestamps:
-            latest_sub = max(subfolder_timestamps.keys())
-            timestamp_bands = subfolder_timestamps[latest_sub]
-            logger.info(f"/available: using latest subfolder '{latest_sub}' ({len(timestamp_bands)} timestamps)")
-        else:
-            # Fall back to flat layout if no subfolders found
-            timestamp_bands = flat_timestamp_bands
+                    ts, found_band = m.group(1), m.group(2)
+                    _timestamp_to_h5_subfolder[ts] = latest_sub
+                    if ts not in timestamp_bands:
+                        timestamp_bands[ts] = set()
+                    timestamp_bands[ts].add(found_band)
+            else:
+                # Fall back to flat layout (old format: no subfolders, files directly under date_folder)
+                for blob in bucket.list_blobs(prefix=date_prefix):
+                    m = re.search(r"forecasts/[^/]+/forecast_(\d{12})_([^.]+)\.tiff$", blob.name)
+                    if not m:
+                        continue
+                    ts, found_band = m.group(1), m.group(2)
+                    if ts not in timestamp_bands:
+                        timestamp_bands[ts] = set()
+                    timestamp_bands[ts].add(found_band)
 
         # Convert to sorted list with datetime info
         timestamps = []
