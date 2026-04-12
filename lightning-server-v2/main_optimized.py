@@ -463,8 +463,11 @@ async def get_available_timesteps(
         storage_client, bucket_name = get_gcs_client()
         bucket = storage_client.bucket(bucket_name)
 
-        # Track timestamps and their available bands
-        timestamp_bands: Dict[str, Set[str]] = {}
+        # Track timestamps and their available bands, grouped by h5 subfolder (run)
+        # subfolder_timestamps: h5_sub -> {ts -> set(bands)}
+        subfolder_timestamps: Dict[str, Dict[str, Set[str]]] = {}
+        # flat layout timestamps (old format, no subfolder)
+        flat_timestamp_bands: Dict[str, Set[str]] = {}
         now = datetime.utcnow()
 
         # Scan for each day and each band (1 day back + days forward to catch next-day forecasts)
@@ -489,16 +492,31 @@ async def get_available_timesteps(
                     ts = new_match.group(2)
                     found_band = new_match.group(3)
                     _timestamp_to_h5_subfolder[ts] = h5_sub
+                    if h5_sub not in subfolder_timestamps:
+                        subfolder_timestamps[h5_sub] = {}
+                    if ts not in subfolder_timestamps[h5_sub]:
+                        subfolder_timestamps[h5_sub][ts] = set()
+                    subfolder_timestamps[h5_sub][ts].add(found_band)
                 else:
                     old_match = re.search(r"forecast_(\d{12})_([^.]+)\.tiff$", blob.name)
                     if not old_match:
                         continue
                     ts = old_match.group(1)
                     found_band = old_match.group(2)
+                    if ts not in flat_timestamp_bands:
+                        flat_timestamp_bands[ts] = set()
+                    flat_timestamp_bands[ts].add(found_band)
 
-                if ts not in timestamp_bands:
-                    timestamp_bands[ts] = set()
-                timestamp_bands[ts].add(found_band)
+        # Use only the latest subfolder (run) per day to avoid mixing stale runs.
+        # Subfolder names are YYYY-MM-DD_HH-MM_region so lexicographic max = most recent.
+        timestamp_bands: Dict[str, Set[str]] = {}
+        if subfolder_timestamps:
+            latest_sub = max(subfolder_timestamps.keys())
+            timestamp_bands = subfolder_timestamps[latest_sub]
+            logger.info(f"/available: using latest subfolder '{latest_sub}' ({len(timestamp_bands)} timestamps)")
+        else:
+            # Fall back to flat layout if no subfolders found
+            timestamp_bands = flat_timestamp_bands
 
         # Convert to sorted list with datetime info
         timestamps = []
