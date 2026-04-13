@@ -38,6 +38,8 @@ class _ForecastScreenState extends State<ForecastScreen> {
   // Layer management
   String? _activeSourceId;
   String? _activeLayerId;
+  final Set<String> _addedSourceIds = {};
+  final Set<String> _addedLayerIds = {};
 
   // Channel selection
   Channel _selectedChannel = primaryChannels[1];
@@ -95,6 +97,7 @@ class _ForecastScreenState extends State<ForecastScreen> {
   Future<void> _refresh() async {
     setState(() => _isRefreshing = true);
     try {
+      await _clearAllTileLayers();
       final result = await fetchAvailableTimesteps();
       if (!mounted) return;
       setState(() {
@@ -108,6 +111,29 @@ class _ForecastScreenState extends State<ForecastScreen> {
     } finally {
       if (mounted) setState(() => _isRefreshing = false);
     }
+  }
+
+  Future<void> _clearAllTileLayers() async {
+    final map = _mapboxMap;
+    if (map == null) return;
+    for (final layerId in List.of(_addedLayerIds)) {
+      try {
+        if (await map.style.styleLayerExists(layerId)) {
+          await map.style.removeStyleLayer(layerId);
+        }
+      } catch (_) {}
+    }
+    for (final sourceId in List.of(_addedSourceIds)) {
+      try {
+        if (await map.style.styleSourceExists(sourceId)) {
+          await map.style.removeStyleSource(sourceId);
+        }
+      } catch (_) {}
+    }
+    _addedLayerIds.clear();
+    _addedSourceIds.clear();
+    _activeSourceId = null;
+    _activeLayerId = null;
   }
 
   // ───────────────────────── Map setup ─────────────────────────
@@ -181,6 +207,7 @@ class _ForecastScreenState extends State<ForecastScreen> {
           maxzoom: 10,
           volatile: false,
         ));
+        _addedSourceIds.add(newSourceId);
       }
 
       // Add layer only if it doesn't already exist
@@ -192,6 +219,7 @@ class _ForecastScreenState extends State<ForecastScreen> {
           rasterOpacity: 0,
           rasterFadeDuration: 0,
         ));
+        _addedLayerIds.add(newLayerId);
       }
 
       // Fade in new layer
@@ -741,17 +769,39 @@ class _ForecastScreenState extends State<ForecastScreen> {
           color: isSelected ? _channelSelectedColor(ch) : Colors.black,
           borderRadius: BorderRadius.circular(20),
         ),
-        child: _channelPillContent(ch, isAvailable),
+        child: _channelPillContent(ch, isAvailable, isSelected),
       ),
     );
   }
 
-  Widget _channelPillContent(Channel ch, bool isAvailable) {
+  Widget _channelPillContent(Channel ch, bool isAvailable, bool isSelected) {
     final color = isAvailable ? Colors.white : Colors.white38;
     if (ch.id == 'lightning') {
-      return Icon(Icons.bolt_outlined, color: Colors.white, size: 18);
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.bolt_outlined, color: color, size: 18),
+          if (isSelected) ...[
+            const SizedBox(width: 6),
+            Text(ch.label,
+                style: TextStyle(
+                    color: color, fontSize: 13, fontWeight: FontWeight.w500)),
+          ],
+        ],
+      );
     } else if (ch.id == 'radar') {
-      return Icon(Icons.grain, color: Colors.white, size: 18);
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.grain, color: color, size: 18),
+          if (isSelected) ...[
+            const SizedBox(width: 6),
+            Text(ch.label,
+                style: TextStyle(
+                    color: color, fontSize: 13, fontWeight: FontWeight.w500)),
+          ],
+        ],
+      );
     }
     return Text(
       ch.label,

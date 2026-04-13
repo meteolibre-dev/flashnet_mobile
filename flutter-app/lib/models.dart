@@ -32,7 +32,7 @@ class Channel {
 
 const primaryChannels = [
   Channel(id: 'lightning', label: 'Thunder', isPrimary: true),
-  Channel(id: 'radar', label: 'Radar', isPrimary: true),
+  Channel(id: 'radar', label: 'Rain', isPrimary: true),
 ];
 
 const secondaryChannels = [
