@@ -677,7 +677,7 @@ def get_tile_png(
         content=buffer.getvalue(),
         media_type="image/png",
         headers={
-            "Cache-Control": "public, max-age=600",  # 10 min browser cache
+            "Cache-Control": "public, max-age=60",  # 1 min browser cache
             "ETag": f'"{tile_hash}"'
         }
     )
