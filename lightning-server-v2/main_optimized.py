@@ -668,7 +668,7 @@ def get_tile_png(
     
     img = Image.fromarray(rgba, mode='RGBA')
     buffer = BytesIO()
-    img.save(buffer, format='PNG', optimize=True)
+    img.save(buffer, format='PNG')
     
     # Generate ETag for response
     tile_hash = md5(rgba.tobytes()).hexdigest()
@@ -869,18 +869,6 @@ async def get_bounds(
             "error": f"Failed to get COG URL: {str(e)}"
         })
 
-    # Check if file is ready before attempting to read
-    if not verify_cog_file_ready(time, band):
-        return JSONResponse({
-            "url": url,
-            "bounds": default_bounds,
-            "crs": "EPSG:4326",
-            "size": None,
-            "nodata": None,
-            "overviews": [],
-            "error": "File not ready or still uploading"
-        })
-
     try:
         with rasterio.open(url) as cog:
             bounds = cog.bounds
@@ -950,10 +938,6 @@ async def get_info(
         raise HTTPException(status_code=400, detail=f"Invalid band: {band}")
 
     url = get_cog_url(time, band)
-
-    # Check if file is ready before attempting to read
-    if not verify_cog_file_ready(time, band):
-        raise HTTPException(status_code=404, detail="File not ready or still uploading")
 
     try:
         with rasterio.open(url) as cog:
@@ -1209,10 +1193,16 @@ if __name__ == "__main__":
     print(f"Starting Lightning Server V2 on port {PORT}")
     print(f"Data source: {BUCKET_BASE_URL}")
 
+    import multiprocessing
+
+    workers = int(os.getenv("UVICORN_WORKERS", multiprocessing.cpu_count()))
+    print(f"Starting with {workers} workers")
+
     uvicorn.run(
         "main_optimized:app",
         host="0.0.0.0",
         port=PORT,
         reload=False,
-        log_level="info"
+        log_level="info",
+        workers=workers
     )
