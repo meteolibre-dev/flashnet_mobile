@@ -294,7 +294,7 @@ for band_name, config in BANDS.items():
 
 
 
-def get_cog_url(timestamp: str, band: str) -> str:
+def get_cog_url(timestamp: str, band: str, run_time: Optional[str] = None) -> str:
     """
     Generate the COG URL for a given timestamp and band.
     Uses GDAL's /vsigs/ virtual file system which natively supports 
@@ -303,9 +303,13 @@ def get_cog_url(timestamp: str, band: str) -> str:
     This eliminates the signed URL bottleneck (50-200ms per request)
     by letting GDAL handle GCS authentication directly.
     
-    Matches the naming convention from inference_engine.py:
-    - forecast_{timestamp}_sat_ch{0,1,...}.tiff
-    - forecast_{timestamp}_lightning.tiff
+    Args:
+        timestamp: Forecast timestamp (YYYYMMDDHHMM)
+        band: Band name (lightning, radar, sat_ch0, ...)
+        run_time: Explicit run identifier (H5 subfolder name, e.g. "2026-04-20_08-20").
+                  When provided, skips GCS bucket scanning and builds the path directly.
+                  Acts as a cache-busting key: when a new forecast run lands,
+                  the run_time changes → natural cache invalidation.
     """
     global _gcs_bucket_name
     
@@ -316,6 +320,11 @@ def get_cog_url(timestamp: str, band: str) -> str:
     # Convert YYYYMMDD to YYYY-MM-DD for bucket path
     date_folder = f"{timestamp[:4]}-{timestamp[4:6]}-{timestamp[6:8]}"
 
+    # Use explicit run_time if provided (avoids GCS lookup entirely)
+    if run_time:
+        return f"/vsigs/{_gcs_bucket_name}/forecasts/{date_folder}/{run_time}/forecast_{timestamp}_{band}.tiff"
+
+    # Fallback: discover subfolder via GCS scan
     h5_subfolder = _find_h5_subfolder(timestamp)
     if h5_subfolder:
         return f"/vsigs/{_gcs_bucket_name}/forecasts/{date_folder}/{h5_subfolder}/forecast_{timestamp}_{band}.tiff"
@@ -525,7 +534,8 @@ async def get_available_timesteps(
                     "timestamp": ts,
                     "datetime": dt.isoformat() + "Z",
                     "date_folder": f"{year}-{month}-{day}",
-                    "available_bands": list(bands)
+                    "available_bands": list(bands),
+                    "run_time": latest_sub if all_run_subfolders else None
                 })
             except ValueError:
                 continue
@@ -533,7 +543,8 @@ async def get_available_timesteps(
         return {
             "timestamps": timestamps,
             "count": len(timestamps),
-            "all_bands": list(BANDS.keys())
+            "all_bands": list(BANDS.keys()),
+            "run_time": latest_sub if all_run_subfolders else None
         }
 
     except Exception as e:
@@ -647,14 +658,19 @@ def get_tile_png(
     x: int,
     y: int,
     band: str = Query(..., description="Band: lightning, sat_ch0, sat_ch1, ..."),
-    time: str = Query(..., description="Timestamp: YYYYMMDDHHMM")
+    time: str = Query(..., description="Timestamp: YYYYMMDDHHMM"),
+    run_time: Optional[str] = Query(None, description="Run identifier (H5 subfolder) from /available. Enables cache-busting & skips GCS lookups.")
 ):
     """
     Get a PNG tile for the specified band and time.
     Uses COG internal overviews for optimal performance.
+    
+    Pass run_time from /available to:
+    - Skip GCS bucket scanning (faster URL resolution)
+    - Enable accurate caching (cache key includes run_time)
     """
 
-    rgba = generate_tile_rgba(x, y, z, band, time)
+    rgba = generate_tile_rgba(x, y, z, band, time, run_time)
     
     if rgba is None:
         img = Image.new('RGBA', (256, 256), (0, 0, 0, 0))
@@ -683,7 +699,7 @@ def get_tile_png(
     )
 
 
-def generate_tile_rgba(x: int, y: int, z: int, band: str, time: str) -> Optional[np.ndarray]:
+def generate_tile_rgba(x: int, y: int, z: int, band: str, time: str, run_time: Optional[str] = None) -> Optional[np.ndarray]:
     """Generate RGBA array for a single tile. Returns None on error."""
     if band not in BANDS:
         return None
@@ -696,7 +712,7 @@ def generate_tile_rgba(x: int, y: int, z: int, band: str, time: str) -> Optional
     
     for attempt in range(max_retries):
         try:
-            url = get_cog_url(time, band)
+            url = get_cog_url(time, band, run_time=run_time)
             logger.debug(f"COG URL for {time}/{band}: {url}")
         except Exception as e:
             import traceback
