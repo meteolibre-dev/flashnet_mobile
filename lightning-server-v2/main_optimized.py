@@ -105,7 +105,7 @@ else:
 import re
 import json
 import logging
-from typing import Dict, Optional, Set
+from typing import Dict, Optional, Set, Tuple
 from io import BytesIO
 from PIL import Image
 
@@ -119,6 +119,7 @@ from datetime import datetime, timedelta
 from hashlib import md5
 import hashlib
 import json as json_pkg
+import threading
 
 import numpy as np
 import requests
@@ -273,6 +274,53 @@ BANDS: Dict[str, BandConfig] = {
 # ============================================
 # PERFORMANCE OPTIMIZATIONS
 # ============================================
+
+# ============================================
+# LRU TILE CACHE
+# ============================================
+
+_TILE_CACHE_MAX_SIZE = int(os.getenv("TILE_CACHE_MAX_SIZE", "2000"))
+_TILE_CACHE_LOCK = threading.Lock()
+_tile_cache: Dict[Tuple, bytes] = {}
+_tile_cache_order: list = []  # Most-recent-last for LRU eviction
+
+def _cache_get(key: Tuple) -> Optional[bytes]:
+    """Thread-safe LRU cache lookup."""
+    with _TILE_CACHE_LOCK:
+        if key in _tile_cache:
+            # Move to end (most recently used)
+            _tile_cache_order.remove(key)
+            _tile_cache_order.append(key)
+            return _tile_cache[key]
+    return None
+
+def _cache_put(key: Tuple, value: bytes) -> None:
+    """Thread-safe LRU cache insert with eviction."""
+    with _TILE_CACHE_LOCK:
+        if key in _tile_cache:
+            _tile_cache_order.remove(key)
+        elif len(_tile_cache) >= _TILE_CACHE_MAX_SIZE:
+            # Evict oldest (front of list)
+            oldest = _tile_cache_order.pop(0)
+            del _tile_cache[oldest]
+        _tile_cache[key] = value
+        _tile_cache_order.append(key)
+
+def _cache_invalidate(run_time: Optional[str] = None) -> int:
+    """Invalidate cache entries. If run_time given, only evict entries NOT matching it."""
+    with _TILE_CACHE_LOCK:
+        if run_time is None:
+            count = len(_tile_cache)
+            _tile_cache.clear()
+            _tile_cache_order.clear()
+            return count
+        # Evict entries whose run_time differs from the current one
+        to_remove = [k for k in _tile_cache if k[5] != run_time]
+        for k in to_remove:
+            del _tile_cache[k]
+            _tile_cache_order.remove(k)
+        return len(to_remove)
+
 
 # Pre-computed colormaps at startup (avoid recreating per tile)
 from matplotlib import cm as matplotlib_cm
@@ -500,6 +548,10 @@ async def get_available_timesteps(
         if all_run_subfolders:
             latest_sub, latest_prefix = max(all_run_subfolders, key=lambda x: x[0])
             logger.info(f"/available: using latest run '{latest_sub}'")
+            # Evict stale cache entries from previous runs
+            evicted = _cache_invalidate(run_time=latest_sub)
+            if evicted > 0:
+                logger.info(f"Cache: evicted {evicted} entries from stale runs")
             for blob in bucket.list_blobs(prefix=latest_prefix):
                 m = re.search(r"forecast_(\d{12})_([^.]+)\.tiff$", blob.name)
                 if not m:
@@ -652,6 +704,26 @@ async def debug_read(
     return result
 
 
+@app.get("/cache/stats")
+async def cache_stats():
+    """Cache statistics for monitoring."""
+    with _TILE_CACHE_LOCK:
+        total_size = sum(len(v) for v in _tile_cache.values())
+        return {
+            "entries": len(_tile_cache),
+            "max_entries": _TILE_CACHE_MAX_SIZE,
+            "total_bytes": total_size,
+            "total_mb": round(total_size / 1024 / 1024, 2),
+        }
+
+
+@app.get("/cache/clear")
+async def cache_clear():
+    """Clear the tile cache."""
+    count = _cache_invalidate()
+    return {"cleared": count}
+
+
 @app.get("/tiles/{z}/{x}/{y}.png")
 def get_tile_png(
     z: int,
@@ -670,31 +742,56 @@ def get_tile_png(
     - Enable accurate caching (cache key includes run_time)
     """
 
+    cache_key = (z, x, y, band, time, run_time)
+
+    # Check LRU cache first
+    cached_png = _cache_get(cache_key)
+    if cached_png is not None:
+        return Response(
+            content=cached_png,
+            media_type="image/png",
+            headers={
+                "Cache-Control": "public, max-age=300",
+                "X-Cache": "HIT"
+            }
+        )
+
     rgba = generate_tile_rgba(x, y, z, band, time, run_time)
     
     if rgba is None:
         img = Image.new('RGBA', (256, 256), (0, 0, 0, 0))
         buffer = BytesIO()
         img.save(buffer, format='PNG')
+        png_bytes = buffer.getvalue()
+        # Cache empty tiles too (they're tiny and avoid repeated GCS lookups)
+        _cache_put(cache_key, png_bytes)
         return Response(
-            content=buffer.getvalue(),
+            content=png_bytes,
             media_type="image/png",
-            headers={"Cache-Control": "public, max-age=60"}
+            headers={
+                "Cache-Control": "public, max-age=300",
+                "X-Cache": "MISS"
+            }
         )
     
     img = Image.fromarray(rgba, mode='RGBA')
     buffer = BytesIO()
     img.save(buffer, format='PNG')
+    png_bytes = buffer.getvalue()
+    
+    # Store in LRU cache
+    _cache_put(cache_key, png_bytes)
     
     # Generate ETag for response
     tile_hash = md5(rgba.tobytes()).hexdigest()
     
     return Response(
-        content=buffer.getvalue(),
+        content=png_bytes,
         media_type="image/png",
         headers={
-            "Cache-Control": "public, max-age=60",  # 1 min browser cache
-            "ETag": f'"{tile_hash}"'
+            "Cache-Control": "public, max-age=300",  # 5 min browser cache (safe because run_time busts cache on new runs)
+            "ETag": f'"{tile_hash}"',
+            "X-Cache": "MISS"
         }
     )
 
