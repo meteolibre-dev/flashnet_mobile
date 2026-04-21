@@ -18,11 +18,46 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import numpy as np
 import rasterio
+from rasterio.io import MemoryFile
 from google.cloud import storage
 
-# ── GDAL / GCS ──────────────────────────────────────────────────────────
+# ── GDAL / GCS credentials ─────────────────────────────────────────────
 os.environ.setdefault("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", "tif,tiff")
 os.environ.setdefault("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
+
+
+def _init_gcs_credentials():
+    """Decode GCP_CREDENTIALS_B64 and configure GDAL + storage.Client."""
+    import base64, json, tempfile
+    from google.oauth2 import service_account
+
+    creds_b64 = os.getenv("GCP_CREDENTIALS_B64")
+    if not creds_b64:
+        logger.info("No GCP_CREDENTIALS_B64 env var — relying on default credentials")
+        return None
+
+    try:
+        creds_json = base64.b64decode(creds_b64).decode("utf-8")
+        creds_data = json.loads(creds_json)
+        logger.info("Decoded credentials for %s", creds_data.get("client_email", "?"))
+
+        # Configure GDAL /vsigs/ OAuth2 (used by rasterio)
+        if "private_key" in creds_data and "client_email" in creds_data:
+            key_file = tempfile.NamedTemporaryFile(mode="w", suffix=".pem", delete=False)
+            key_file.write(creds_data["private_key"])
+            key_file.flush()
+            os.environ["GS_OAUTH2_PRIVATE_KEY_FILE"] = key_file.name
+            os.environ["GS_OAUTH2_CLIENT_EMAIL"] = creds_data["client_email"]
+            logger.info("Configured GDAL GS_OAUTH2 with %s", creds_data["client_email"])
+
+        # Return credentials for storage.Client()
+        return service_account.Credentials.from_service_account_info(creds_data)
+    except Exception as exc:
+        logger.warning("Failed to decode GCP_CREDENTIALS_B64: %s", exc)
+        return None
+
+
+_gcs_credentials = _init_gcs_credentials()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("benchmark-api")
@@ -62,7 +97,7 @@ def discover_latest_run() -> Optional[dict]:
 
     Returns dict with date_folder, run_subfolder, issuance_time or None.
     """
-    client = storage.Client()
+    client = storage.Client(credentials=_gcs_credentials)
     bucket = client.bucket(BUCKET_NAME)
     now = datetime.now(timezone.utc)
     candidates: list[tuple[str, str]] = []
@@ -216,10 +251,14 @@ def get_precip_forecast(
         raise HTTPException(503, "No forecast data available yet")
 
     issuance = run["issuance_time"]
-    base_path = (
-        f"/vsigs/{BUCKET_NAME}/{FORECASTS_PREFIX}/"
+    blob_prefix = (
+        f"{FORECASTS_PREFIX}/"
         f"{run['date_folder']}/{run['run_subfolder']}"
     )
+
+    # Reuse a single GCS client + bucket for all steps
+    gcs_client = storage.Client(credentials=_gcs_credentials)
+    bucket = gcs_client.bucket(BUCKET_NAME)
 
     # ── sample each lead-time TIFF ──────────────────────────────────
     forecasts: list[ForecastEntry] = []
@@ -227,19 +266,23 @@ def get_precip_forecast(
     for step in range(1, MAX_FORECAST_STEPS + 1):
         valid = issuance + timedelta(minutes=STEP_MINUTES * step)
         fname = f"forecast_{valid.strftime('%Y%m%d%H%M')}_radar.tiff"
-        tiff_url = f"{base_path}/{fname}"
+        blob_path = f"{blob_prefix}/{fname}"
 
         try:
-            with rasterio.open(tiff_url) as ds:
-                rows = list(ds.sample([(lon, lat)]))
-                value = float(rows[0][0])
+            blob = bucket.blob(blob_path)
+            tiff_bytes = blob.download_as_bytes()
+
+            with MemoryFile(tiff_bytes) as memfile:
+                with memfile.open() as ds:
+                    rows = list(ds.sample([(lon, lat)]))
+                    value = float(rows[0][0])
 
             if not math.isfinite(value) or value <= 0:
                 rate = 0.0
             else:
                 rate = dbz_to_mmh(value)
-        except Exception:
-            # TIFF not uploaded yet or read error — skip this lead time
+        except Exception as exc:
+            logger.warning("Failed to read %s: %s", blob_path, exc)
             continue
 
         is_rain = rate > RATE_THRESHOLD
