@@ -57,14 +57,15 @@ def _init_gcs_credentials():
         return None
 
 
-_gcs_credentials = _init_gcs_credentials()
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("benchmark-api")
+
+_gcs_credentials = _init_gcs_credentials()
 
 # ── Configuration ───────────────────────────────────────────────────────
 BUCKET_NAME: str = os.getenv("BUCKET_NAME", "inference_result_meteolibre_forecast")
 FORECASTS_PREFIX: str = os.getenv("FORECASTS_PREFIX", "forecasts")
+PROJECT_ID: str = os.getenv("PROJECT_ID", "meteoforecast")
 PORT: int = int(os.getenv("PORT", "8080"))
 
 BOUNDS = {
@@ -97,7 +98,7 @@ def discover_latest_run() -> Optional[dict]:
 
     Returns dict with date_folder, run_subfolder, issuance_time or None.
     """
-    client = storage.Client(credentials=_gcs_credentials)
+    client = storage.Client(project=PROJECT_ID, credentials=_gcs_credentials)
     bucket = client.bucket(BUCKET_NAME)
     now = datetime.now(timezone.utc)
     candidates: list[tuple[str, str]] = []
@@ -257,7 +258,7 @@ def get_precip_forecast(
     )
 
     # Reuse a single GCS client + bucket for all steps
-    gcs_client = storage.Client(credentials=_gcs_credentials)
+    gcs_client = storage.Client(project=PROJECT_ID, credentials=_gcs_credentials)
     bucket = gcs_client.bucket(BUCKET_NAME)
 
     # ── sample each lead-time TIFF ──────────────────────────────────
