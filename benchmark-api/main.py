@@ -82,11 +82,11 @@ def discover_latest_run() -> Optional[dict]:
 
     sub_name, date_str = max(candidates, key=lambda x: x[0])
 
-    # Parse: "2026-04-21_08-20"
+    # Parse: "2026-04-21_11-50_europe"  (date_time[_suffix])
     d, t = sub_name.split("_", 1)
     issuance = datetime(
         int(d[:4]), int(d[5:7]), int(d[8:]),
-        int(t[:2]), int(t[3:]),
+        int(t[:2]), int(t[3:5]),
         tzinfo=timezone.utc,
     )
 
