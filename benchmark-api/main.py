@@ -18,7 +18,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import numpy as np
 import rasterio
-from rasterio.io import MemoryFile
 from google.cloud import storage
 
 # ── GDAL / GCS credentials ─────────────────────────────────────────────
@@ -252,38 +251,30 @@ def get_precip_forecast(
         raise HTTPException(503, "No forecast data available yet")
 
     issuance = run["issuance_time"]
-    blob_prefix = (
-        f"{FORECASTS_PREFIX}/"
+    base_path = (
+        f"/vsigs/{BUCKET_NAME}/{FORECASTS_PREFIX}/"
         f"{run['date_folder']}/{run['run_subfolder']}"
     )
 
-    # Reuse a single GCS client + bucket for all steps
-    gcs_client = storage.Client(project=PROJECT_ID, credentials=_gcs_credentials)
-    bucket = gcs_client.bucket(BUCKET_NAME)
-
-    # ── sample each lead-time TIFF ──────────────────────────────────
+    # ── sample each lead-time TIFF via GDAL /vsigs/ ────────────────
     forecasts: list[ForecastEntry] = []
 
     for step in range(1, MAX_FORECAST_STEPS + 1):
         valid = issuance + timedelta(minutes=STEP_MINUTES * step)
         fname = f"forecast_{valid.strftime('%Y%m%d%H%M')}_radar.tiff"
-        blob_path = f"{blob_prefix}/{fname}"
+        tiff_url = f"{base_path}/{fname}"
 
         try:
-            blob = bucket.blob(blob_path)
-            tiff_bytes = blob.download_as_bytes()
-
-            with MemoryFile(tiff_bytes) as memfile:
-                with memfile.open() as ds:
-                    rows = list(ds.sample([(lon, lat)]))
-                    value = float(rows[0][0])
+            with rasterio.open(tiff_url) as ds:
+                rows = list(ds.sample([(lon, lat)]))
+                value = float(rows[0][0])
 
             if not math.isfinite(value) or value <= 0:
                 rate = 0.0
             else:
                 rate = dbz_to_mmh(value)
         except Exception as exc:
-            logger.warning("Failed to read %s: %s", blob_path, exc)
+            logger.warning("Failed to read %s: %s", tiff_url, exc)
             continue
 
         is_rain = rate > RATE_THRESHOLD
