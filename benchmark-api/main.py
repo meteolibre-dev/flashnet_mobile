@@ -136,6 +136,7 @@ def discover_latest_run() -> Optional[dict]:
 
 class ForecastEntry(BaseModel):
     valid_time: str        # ISO 8601 UTC  e.g. "2026-04-21T08:30:00Z"
+    valid_time_epoch: int  # Unix timestamp (seconds)
     offset_minutes: int
     precip_rate_mmh: float
     precip_type: str       # "rain" | "none"
@@ -281,6 +282,7 @@ def get_precip_forecast(
         forecasts.append(
             ForecastEntry(
                 valid_time=valid.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                valid_time_epoch=int(valid.timestamp()),
                 offset_minutes=step * STEP_MINUTES,
                 precip_rate_mmh=round(rate, 2),
                 precip_type="rain" if is_rain else "none",
