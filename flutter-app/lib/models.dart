@@ -3,12 +3,14 @@ class Timestep {
   final String filenameTime;
   final DateTime fullDate;
   final List<String> availableBands;
+  final String? runTime;
 
   const Timestep({
     required this.dateFolder,
     required this.filenameTime,
     required this.fullDate,
     required this.availableBands,
+    this.runTime,
   });
 
   String get label {

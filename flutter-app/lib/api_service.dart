@@ -34,6 +34,7 @@ Future<({List<Timestep> timesteps, List<String> availableBands})>
       filenameTime: ft,
       fullDate: DateTime.utc(year, month, day, hour, minute),
       availableBands: List<String>.from(ts['available_bands'] ?? []),
+      runTime: ts['run_time'] as String?,
     );
   }).toList()
     ..sort((a, b) => a.fullDate.compareTo(b.fullDate));
@@ -45,8 +46,13 @@ Future<({List<Timestep> timesteps, List<String> availableBands})>
   return (timesteps: sliced, availableBands: allBands);
 }
 
-String tileUrl(Timestep step, String channelId) =>
-    '$_serverUrl/tiles/{z}/{x}/{y}.png?band=$channelId&time=${step.filenameTime}';
+String tileUrl(Timestep step, String channelId) {
+  final base = '$_serverUrl/tiles/{z}/{x}/{y}.png?band=$channelId&time=${step.filenameTime}';
+  if (step.runTime != null) {
+    return '$base&run_time=${step.runTime}';
+  }
+  return base;
+}
 
 String boundsUrl(Timestep step, String channelId) =>
     '$_serverUrl/bounds?band=$channelId&time=${step.filenameTime}';

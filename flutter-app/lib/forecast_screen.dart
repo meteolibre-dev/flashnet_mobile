@@ -48,7 +48,6 @@ class _ForecastScreenState extends State<ForecastScreen> {
   // Location
   geo.Position? _userPosition;
   bool _isLoadingLayer = false;
-  bool _isUpdatingLayer = false;
 
   // Time display
   bool _useLocalTime = true;
@@ -176,10 +175,11 @@ class _ForecastScreenState extends State<ForecastScreen> {
 
   // ───────────────────────── Tile layer ─────────────────────────
 
+  int _layerGeneration = 0;
+
   Future<void> _updateLayer() async {
     final map = _mapboxMap;
     if (map == null || _timesteps.isEmpty) return;
-    if (_isUpdatingLayer) return;
 
     final step = _timesteps[_currentIndex];
     final channelId = _selectedChannel.id;
@@ -190,7 +190,7 @@ class _ForecastScreenState extends State<ForecastScreen> {
     // Already showing this exact layer — nothing to do
     if (_activeSourceId == newSourceId) return;
 
-    _isUpdatingLayer = true;
+    final gen = ++_layerGeneration;
     setState(() => _isLoadingLayer = true);
 
     try {
@@ -210,6 +210,9 @@ class _ForecastScreenState extends State<ForecastScreen> {
         _addedSourceIds.add(newSourceId);
       }
 
+      // Stale check — a newer update was requested while we awaited
+      if (gen != _layerGeneration) return;
+
       // Add layer only if it doesn't already exist
       final layerExists = await map.style.styleLayerExists(newLayerId);
       if (!layerExists) {
@@ -221,6 +224,8 @@ class _ForecastScreenState extends State<ForecastScreen> {
         ));
         _addedLayerIds.add(newLayerId);
       }
+
+      if (gen != _layerGeneration) return;
 
       // Fade in new layer
       await map.style.setStyleLayerProperty(
@@ -248,8 +253,9 @@ class _ForecastScreenState extends State<ForecastScreen> {
     } catch (e) {
       debugPrint('Error updating layer: $e');
     } finally {
-      _isUpdatingLayer = false;
-      if (mounted) setState(() => _isLoadingLayer = false);
+      if (gen == _layerGeneration && mounted) {
+        setState(() => _isLoadingLayer = false);
+      }
     }
   }
 
@@ -742,8 +748,10 @@ class _ForecastScreenState extends State<ForecastScreen> {
               final idx = v.round();
               if (idx != _currentIndex) {
                 setState(() => _currentIndex = idx);
-                _updateLayer();
               }
+            },
+            onChangeEnd: (v) {
+              _updateLayer();
             },
           ),
         ),
