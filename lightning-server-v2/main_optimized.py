@@ -136,6 +136,10 @@ from rio_tiler.io import COGReader
 # Google Cloud Storage for bucket listing
 from google.cloud import storage
 
+# Custom palettes for rain and radar channels
+from palette_pluie import RAIN_CLASSES as PLUIE_RAIN_CLASSES
+from palette_radar_35 import RAIN_CLASSES as RADAR_35_CLASSES, MAX_THRESHOLD as RADAR_35_MAX
+
 # Logging configuration
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -283,14 +287,14 @@ BANDS: Dict[str, BandConfig] = {
         name="Radar Reflectivity",
         min=0,
         max=75,  # dBZ typical range: 0-75
-        colormap="turbo",  # Good for radar - green to red
+        colormap="custom",  # Uses dedicated _RADAR_CMAP_LUT (palette_radar_35)
         invert=False
     ),
     "rain": BandConfig(
         name="Rain Rate (mm/h)",
         min=0,
-        max=50,  # mm/h typical range: 0-50
-        colormap="custom",  # Uses dedicated RAIN_CMAP_LUT
+        max=125,  # mm/h — matches palette_pluie max threshold
+        colormap="custom",  # Uses dedicated _PLUIE_CMAP_LUT (palette_pluie)
         invert=False
     ),
 }
@@ -483,34 +487,36 @@ LIGHTNING_CMAP = {
     4: (255, 0, 0, 255),    # Red
 }
 
-# Rain rate colormap (mm/h) — classic weather-radar style:
-#   transparent → light blue → green → yellow → orange → red → magenta
-# Intensity stops (mm/h):  0   0.5   2    5    10    25    50+
-RAIN_CMAP_STOPS = np.array([
-    # rate_mmh,  R,   G,   B,   A
-    [  0.0,       0,   0,   0,   0],   # transparent (no rain)
-    [  0.1,     120, 180, 255,  60],   # very light drizzle — faint blue
-    [  0.5,     100, 200, 255, 120],   # light rain — light blue
-    [  2.0,      50, 200,  80, 170],   # moderate — green
-    [  5.0,     200, 220,  50, 200],   # moderate-heavy — yellow-green
-    [ 10.0,     255, 180,   0, 220],   # heavy — orange
-    [ 25.0,     255,  60,   0, 240],   # very heavy — red
-    [ 50.0,     200,   0, 200, 255],   # extreme — magenta
-], dtype=np.float64)
+# ─── Rain palette LUT (palette_pluie.py) ────────────────────────────
+# Discrete class palette: 24 classes, thresholds from 0.2 to 125 mm/h.
+_PLUIE_MAX_RATE = 125.0
+_pluie_thresholds = np.array([rc.threshold for rc in PLUIE_RAIN_CLASSES])
+_pluie_rgbs = np.array([list(rc.rgb) + [255] for rc in PLUIE_RAIN_CLASSES], dtype=np.uint8)
 
-# Pre-compute a 256-entry LUT for fast rendering
-_RAIN_CMAP_LUT = np.zeros((256, 4), dtype=np.uint8)
+_PLUIE_CMAP_LUT = np.zeros((256, 4), dtype=np.uint8)
 for _i in range(1, 256):
-    # Map LUT index back to mm/h rate (0–50 range)
-    _rate = (_i / 255.0) * 50.0
-    # Find surrounding stops
-    _stops = RAIN_CMAP_STOPS
-    _idx = int(np.searchsorted(_stops[:, 0], _rate, side='right')) - 1
-    _idx = max(0, min(_idx, len(_stops) - 2))
-    _lo, _hi = _stops[_idx], _stops[_idx + 1]
-    _t = (_rate - _lo[0]) / (_hi[0] - _lo[0]) if _hi[0] != _lo[0] else 0.0
-    _t = np.clip(_t, 0, 1)
-    _RAIN_CMAP_LUT[_i] = (_lo[1:] * (1 - _t) + _hi[1:] * _t).astype(np.uint8)
+    _rate = (_i / 255.0) * _PLUIE_MAX_RATE
+    if _rate < PLUIE_RAIN_CLASSES[0].threshold:
+        continue  # stays transparent
+    _idx = int(np.searchsorted(_pluie_thresholds, _rate, side='right')) - 1
+    _idx = max(0, min(_idx, len(_pluie_thresholds) - 1))
+    _PLUIE_CMAP_LUT[_i] = _pluie_rgbs[_idx]
+# Index 0 stays transparent (no rain)
+
+# ─── Radar palette LUT (palette_radar_35.py) ────────────────────────
+# Discrete class palette: 34 classes, thresholds from 0.02 to 341.9 mm/h.
+_RADAR_MAX_RATE = float(RADAR_35_MAX)
+_radar_thresholds = np.array([rc.threshold for rc in RADAR_35_CLASSES])
+_radar_rgbs = np.array([list(rc.rgb) + [255] for rc in RADAR_35_CLASSES], dtype=np.uint8)
+
+_RADAR_CMAP_LUT = np.zeros((256, 4), dtype=np.uint8)
+for _i in range(1, 256):
+    _rate = (_i / 255.0) * _RADAR_MAX_RATE
+    if _rate < RADAR_35_CLASSES[0].threshold:
+        continue  # stays transparent
+    _idx = int(np.searchsorted(_radar_thresholds, _rate, side='right')) - 1
+    _idx = max(0, min(_idx, len(_radar_thresholds) - 1))
+    _RADAR_CMAP_LUT[_i] = _radar_rgbs[_idx]
 # Index 0 stays transparent (no rain)
 
 
@@ -907,23 +913,34 @@ def generate_tile_rgba(x: int, y: int, z: int, band: str, time: str, run_time: O
                 elif np.any(~np.isfinite(data)):
                     nodata_mask = ~np.isfinite(data)
 
-                # ── Rain band: apply Z-R transform (dBZ → mm/h) ──────────
+                # ── Rain band: Z-R transform + palette_pluie ───────────────
                 if is_rain:
-                    # Vectorised Marshall-Palmer: Z = 200·R^1.6
-                    # Apply dBZ threshold: values below RAIN_MIN_DBZ are clutter/no-rain
                     rain_rate = np.zeros_like(data)
                     valid = data >= RAIN_MIN_DBZ
                     z_linear = np.power(10.0, data[valid] / 10.0)
                     rain_rate[valid] = np.power(z_linear / 200.0, 1.0 / 1.6)
 
-                    # Normalise to 0–255 using the band max (50 mm/h)
-                    data_norm = np.clip(rain_rate / config.max, 0, 1)
+                    data_norm = np.clip(rain_rate / _PLUIE_MAX_RATE, 0, 1)
                     indices = (data_norm * 255).astype(np.uint8)
+                    rgba = _PLUIE_CMAP_LUT[indices]
 
-                    # Apply the pre-computed rain colour LUT
-                    rgba = _RAIN_CMAP_LUT[indices]
+                    zero_mask = rain_rate <= 0
+                    rgba[zero_mask] = [0, 0, 0, 0]
+                    if nodata_mask is not None:
+                        rgba[nodata_mask] = [0, 0, 0, 0]
+                    return rgba
 
-                    # Zero rate → fully transparent
+                # ── Radar band: Z-R transform + palette_radar_35 ────────────
+                if band == "radar":
+                    rain_rate = np.zeros_like(data)
+                    valid = data >= RAIN_MIN_DBZ
+                    z_linear = np.power(10.0, data[valid] / 10.0)
+                    rain_rate[valid] = np.power(z_linear / 200.0, 1.0 / 1.6)
+
+                    data_norm = np.clip(rain_rate / _RADAR_MAX_RATE, 0, 1)
+                    indices = (data_norm * 255).astype(np.uint8)
+                    rgba = _RADAR_CMAP_LUT[indices]
+
                     zero_mask = rain_rate <= 0
                     rgba[zero_mask] = [0, 0, 0, 0]
                     if nodata_mask is not None:
@@ -1336,7 +1353,7 @@ async def get_preview(
             elif np.any(~np.isfinite(data)):
                 nodata_mask = ~np.isfinite(data)
 
-            # ── Rain band in preview: Z-R transform ──────────────────
+            # ── Rain band in preview: Z-R transform + palette_pluie ──
             if band == "rain":
                 rain_rate = np.zeros_like(data)
                 valid = data >= RAIN_MIN_DBZ
@@ -1349,9 +1366,35 @@ async def get_preview(
                     pil_rr = pil_rr.resize((width, height), PILImage.Resampling.BILINEAR)
                     rain_rate = np.array(pil_rr)
 
-                data_norm = np.clip(rain_rate / config.max, 0, 1)
+                data_norm = np.clip(rain_rate / _PLUIE_MAX_RATE, 0, 1)
                 indices = (data_norm * 255).astype(np.uint8)
-                rgba = _RAIN_CMAP_LUT[indices]
+                rgba = _PLUIE_CMAP_LUT[indices]
+
+                zero_mask = rain_rate <= 0
+                rgba[zero_mask] = [0, 0, 0, 0]
+                if nodata_mask is not None:
+                    if nodata_mask.shape != (height, width):
+                        mask_img = PILImage.fromarray(nodata_mask.astype(np.uint8) * 255)
+                        mask_img = mask_img.resize((width, height), PILImage.Resampling.NEAREST)
+                        nodata_mask = np.array(mask_img) > 127
+                    rgba[nodata_mask] = [0, 0, 0, 0]
+
+            # ── Radar band in preview: Z-R transform + palette_radar_35 ──
+            elif band == "radar":
+                rain_rate = np.zeros_like(data)
+                valid = data >= RAIN_MIN_DBZ
+                z_linear = np.power(10.0, data[valid] / 10.0)
+                rain_rate[valid] = np.power(z_linear / 200.0, 1.0 / 1.6)
+
+                # Resize if needed
+                if rain_rate.shape != (height, width):
+                    pil_rr = PILImage.fromarray(rain_rate.astype(np.float32), mode='F')
+                    pil_rr = pil_rr.resize((width, height), PILImage.Resampling.BILINEAR)
+                    rain_rate = np.array(pil_rr)
+
+                data_norm = np.clip(rain_rate / _RADAR_MAX_RATE, 0, 1)
+                indices = (data_norm * 255).astype(np.uint8)
+                rgba = _RADAR_CMAP_LUT[indices]
 
                 zero_mask = rain_rate <= 0
                 rgba[zero_mask] = [0, 0, 0, 0]
