@@ -137,7 +137,7 @@ from rio_tiler.io import COGReader
 from google.cloud import storage
 
 # Custom palette for radar (rain rate) channel
-from palette_pluie import RAIN_CLASSES as PLUIE_RAIN_CLASSES
+from palette_radar_35 import RAIN_CLASSES as RADAR_35_CLASSES, MAX_THRESHOLD as RADAR_35_MAX
 
 # Logging configuration
 logging.basicConfig(level=logging.INFO)
@@ -278,8 +278,8 @@ BANDS: Dict[str, BandConfig] = {
     "radar": BandConfig(
         name="Rain Rate (mm/h)",
         min=0,
-        max=125,  # mm/h — matches palette_pluie max threshold
-        colormap="custom",  # Uses dedicated palette_pluie with log mapping
+        max=130,  # mm/h — matches palette_radar_35 range
+        colormap="custom",  # Uses palette_radar_35 with log mapping
         invert=False
     ),
 }
@@ -467,21 +467,23 @@ LIGHTNING_CMAP = {
     4: (255, 0, 0, 255),    # Red
 }
 
-# ─── Rain palette LUT (palette_pluie.py) ────────────────────────────
+# ─── Radar palette LUT (palette_radar_35.py) ────────────────────────────
 # Discrete class palette: 24 classes, thresholds from 0.2 to 125 mm/h.
+# ─── Radar palette LUT (palette_radar_35.py) ────────────────────────
+# Discrete class palette: 34 classes, thresholds from 0.02 to 341.9 mm/h.
 # Uses LOGARITHMIC mapping so that low rain rates (0.1–2 mm/h) get enough
 # LUT indices to be visible.  With a linear mapping, values < 0.5 mm/h
 # all collapse to index 0 (transparent) due to integer truncation.
-_RADAR_MAX_RATE = 125.0
-_RADAR_LOG_MIN = np.log(0.01)   # floor of log range (0.01 mm/h)
+_RADAR_MAX_RATE = float(RADAR_35_MAX)
+_RADAR_LOG_MIN = np.log(0.005)   # floor of log range
 _RADAR_LOG_MAX = np.log(_RADAR_MAX_RATE)
-_radar_thresholds = np.array([rc.threshold for rc in PLUIE_RAIN_CLASSES])
-_radar_rgbs = np.array([list(rc.rgb) + [255] for rc in PLUIE_RAIN_CLASSES], dtype=np.uint8)
+_radar_thresholds = np.array([rc.threshold for rc in RADAR_35_CLASSES])
+_radar_rgbs = np.array([list(rc.rgb) + [255] for rc in RADAR_35_CLASSES], dtype=np.uint8)
 
 _RADAR_CMAP_LUT = np.zeros((256, 4), dtype=np.uint8)
 for _i in range(1, 256):
     _rate = np.exp(_RADAR_LOG_MIN + (_i / 255.0) * (_RADAR_LOG_MAX - _RADAR_LOG_MIN))
-    if _rate < PLUIE_RAIN_CLASSES[0].threshold:
+    if _rate < RADAR_35_CLASSES[0].threshold:
         continue  # stays transparent
     _idx = int(np.searchsorted(_radar_thresholds, _rate, side='right')) - 1
     _idx = max(0, min(_idx, len(_radar_thresholds) - 1))
@@ -873,7 +875,7 @@ def generate_tile_rgba(x: int, y: int, z: int, band: str, time: str, run_time: O
                 elif np.any(~np.isfinite(data)):
                     nodata_mask = ~np.isfinite(data)
 
-                # ── Radar band: Z-R transform (dBZ → mm/h) + palette_pluie ─
+                # ── Radar band: Z-R transform (dBZ → mm/h) + palette_radar_35 ─
                 if band == "radar":
                     rain_rate = np.zeros_like(data)
                     valid = data > 0
@@ -1301,7 +1303,7 @@ async def get_preview(
             elif np.any(~np.isfinite(data)):
                 nodata_mask = ~np.isfinite(data)
 
-            # ── Radar band in preview: Z-R transform + palette_pluie ──
+            # ── Radar band in preview: Z-R transform + palette_radar_35 ──
             if band == "radar":
                 rain_rate = np.zeros_like(data)
                 valid = data > 0
