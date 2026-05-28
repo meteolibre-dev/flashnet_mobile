@@ -136,9 +136,8 @@ from rio_tiler.io import COGReader
 # Google Cloud Storage for bucket listing
 from google.cloud import storage
 
-# Custom palettes for rain and radar channels
+# Custom palette for radar (rain rate) channel
 from palette_pluie import RAIN_CLASSES as PLUIE_RAIN_CLASSES
-from palette_radar_35 import RAIN_CLASSES as RADAR_35_CLASSES, MAX_THRESHOLD as RADAR_35_MAX
 
 # Logging configuration
 logging.basicConfig(level=logging.INFO)
@@ -277,17 +276,10 @@ BANDS: Dict[str, BandConfig] = {
         invert=True
     ),
     "radar": BandConfig(
-        name="Radar Reflectivity",
-        min=0,
-        max=75,  # dBZ typical range: 0-75
-        colormap="custom",  # Uses dedicated _RADAR_CMAP_LUT (palette_radar_35)
-        invert=False
-    ),
-    "rain": BandConfig(
         name="Rain Rate (mm/h)",
         min=0,
         max=125,  # mm/h — matches palette_pluie max threshold
-        colormap="custom",  # Uses dedicated _PLUIE_CMAP_LUT (palette_pluie)
+        colormap="custom",  # Uses dedicated palette_pluie with log mapping
         invert=False
     ),
 }
@@ -375,16 +367,13 @@ def get_cog_url(timestamp: str, band: str, run_time: Optional[str] = None) -> st
     
     Args:
         timestamp: Forecast timestamp (YYYYMMDDHHMM)
-        band: Band name (lightning, radar, rain, sat_ch0, ...)
+        band: Band name (lightning, radar, sat_ch0, ...)
         run_time: Explicit run identifier (H5 subfolder name, e.g. "2026-04-20_08-20").
                   When provided, skips GCS bucket scanning and builds the path directly.
                   Acts as a cache-busting key: when a new forecast run lands,
                   the run_time changes → natural cache invalidation.
     """
     global _gcs_bucket_name
-    
-    # The 'rain' channel reads from the 'radar' COG and applies Z-R transform
-    source_band = "radar" if band == "rain" else band
     
     # Ensure bucket name is initialized (lazy initialization)
     if _gcs_bucket_name is None:
@@ -395,15 +384,15 @@ def get_cog_url(timestamp: str, band: str, run_time: Optional[str] = None) -> st
 
     # Use explicit run_time if provided (avoids GCS lookup entirely)
     if run_time:
-        return f"/vsigs/{_gcs_bucket_name}/forecasts/{date_folder}/{run_time}/forecast_{timestamp}_{source_band}.tiff"
+        return f"/vsigs/{_gcs_bucket_name}/forecasts/{date_folder}/{run_time}/forecast_{timestamp}_{band}.tiff"
 
     # Fallback: discover subfolder via GCS scan
     h5_subfolder = _find_h5_subfolder(timestamp)
     if h5_subfolder:
-        return f"/vsigs/{_gcs_bucket_name}/forecasts/{date_folder}/{h5_subfolder}/forecast_{timestamp}_{source_band}.tiff"
+        return f"/vsigs/{_gcs_bucket_name}/forecasts/{date_folder}/{h5_subfolder}/forecast_{timestamp}_{band}.tiff"
 
     # Fallback to flat layout for files uploaded before the subfolder change
-    return f"/vsigs/{_gcs_bucket_name}/forecasts/{date_folder}/forecast_{timestamp}_{source_band}.tiff"
+    return f"/vsigs/{_gcs_bucket_name}/forecasts/{date_folder}/forecast_{timestamp}_{band}.tiff"
 
 
 def verify_cog_file_ready(timestamp: str, band: str, max_retries: int = 3, retry_delay: float = 1.0) -> bool:
@@ -420,13 +409,11 @@ def verify_cog_file_ready(timestamp: str, band: str, max_retries: int = 3, retry
         get_gcs_client()
     
     date_folder = f"{timestamp[:4]}-{timestamp[4:6]}-{timestamp[6:8]}"
-    # rain reads from radar COG files
-    source_band = "radar" if band == "rain" else band
     h5_subfolder = _find_h5_subfolder(timestamp)
     if h5_subfolder:
-        blob_name = f"forecasts/{date_folder}/{h5_subfolder}/forecast_{timestamp}_{source_band}.tiff"
+        blob_name = f"forecasts/{date_folder}/{h5_subfolder}/forecast_{timestamp}_{band}.tiff"
     else:
-        blob_name = f"forecasts/{date_folder}/forecast_{timestamp}_{source_band}.tiff"
+        blob_name = f"forecasts/{date_folder}/forecast_{timestamp}_{band}.tiff"
 
     storage_client, bucket_name = get_gcs_client()
     bucket = storage_client.bucket(bucket_name)
@@ -482,30 +469,19 @@ LIGHTNING_CMAP = {
 
 # ─── Rain palette LUT (palette_pluie.py) ────────────────────────────
 # Discrete class palette: 24 classes, thresholds from 0.2 to 125 mm/h.
-_PLUIE_MAX_RATE = 125.0
-_pluie_thresholds = np.array([rc.threshold for rc in PLUIE_RAIN_CLASSES])
-_pluie_rgbs = np.array([list(rc.rgb) + [255] for rc in PLUIE_RAIN_CLASSES], dtype=np.uint8)
-
-_PLUIE_CMAP_LUT = np.zeros((256, 4), dtype=np.uint8)
-for _i in range(1, 256):
-    _rate = (_i / 255.0) * _PLUIE_MAX_RATE
-    if _rate < PLUIE_RAIN_CLASSES[0].threshold:
-        continue  # stays transparent
-    _idx = int(np.searchsorted(_pluie_thresholds, _rate, side='right')) - 1
-    _idx = max(0, min(_idx, len(_pluie_thresholds) - 1))
-    _PLUIE_CMAP_LUT[_i] = _pluie_rgbs[_idx]
-# Index 0 stays transparent (no rain)
-
-# ─── Radar palette LUT (palette_radar_35.py) ────────────────────────
-# Discrete class palette: 34 classes, thresholds from 0.02 to 341.9 mm/h.
-_RADAR_MAX_RATE = float(RADAR_35_MAX)
-_radar_thresholds = np.array([rc.threshold for rc in RADAR_35_CLASSES])
-_radar_rgbs = np.array([list(rc.rgb) + [255] for rc in RADAR_35_CLASSES], dtype=np.uint8)
+# Uses LOGARITHMIC mapping so that low rain rates (0.1–2 mm/h) get enough
+# LUT indices to be visible.  With a linear mapping, values < 0.5 mm/h
+# all collapse to index 0 (transparent) due to integer truncation.
+_RADAR_MAX_RATE = 125.0
+_RADAR_LOG_MIN = np.log(0.01)   # floor of log range (0.01 mm/h)
+_RADAR_LOG_MAX = np.log(_RADAR_MAX_RATE)
+_radar_thresholds = np.array([rc.threshold for rc in PLUIE_RAIN_CLASSES])
+_radar_rgbs = np.array([list(rc.rgb) + [255] for rc in PLUIE_RAIN_CLASSES], dtype=np.uint8)
 
 _RADAR_CMAP_LUT = np.zeros((256, 4), dtype=np.uint8)
 for _i in range(1, 256):
-    _rate = (_i / 255.0) * _RADAR_MAX_RATE
-    if _rate < RADAR_35_CLASSES[0].threshold:
+    _rate = np.exp(_RADAR_LOG_MIN + (_i / 255.0) * (_RADAR_LOG_MAX - _RADAR_LOG_MIN))
+    if _rate < PLUIE_RAIN_CLASSES[0].threshold:
         continue  # stays transparent
     _idx = int(np.searchsorted(_radar_thresholds, _rate, side='right')) - 1
     _idx = max(0, min(_idx, len(_radar_thresholds) - 1))
@@ -620,9 +596,6 @@ async def get_available_timesteps(
                 if ts not in timestamp_bands:
                     timestamp_bands[ts] = set()
                 timestamp_bands[ts].add(found_band)
-                # rain is derived from radar via Z-R transform
-                if found_band == "radar":
-                    timestamp_bands[ts].add("rain")
         elif flat_prefix_fallback:
             # Old flat layout: files directly under forecasts/YYYY-MM-DD/
             for blob in bucket.list_blobs(prefix=flat_prefix_fallback):
@@ -633,8 +606,6 @@ async def get_available_timesteps(
                 if ts not in timestamp_bands:
                     timestamp_bands[ts] = set()
                 timestamp_bands[ts].add(found_band)
-                if found_band == "radar":
-                    timestamp_bands[ts].add("rain")
 
         # Convert to sorted list with datetime info
         timestamps = []
@@ -867,10 +838,6 @@ def generate_tile_rgba(x: int, y: int, z: int, band: str, time: str, run_time: O
     
     config = BANDS[band]
     
-    # The 'rain' band reads radar data and applies Z-R transform
-    is_rain = (band == "rain")
-    source_band = "radar" if is_rain else band
-    
     # Retry logic for transient GCS/network errors
     max_retries = 3
     retry_delay = 0.5  # seconds
@@ -906,31 +873,19 @@ def generate_tile_rgba(x: int, y: int, z: int, band: str, time: str, run_time: O
                 elif np.any(~np.isfinite(data)):
                     nodata_mask = ~np.isfinite(data)
 
-                # ── Rain band: Z-R transform + palette_pluie ───────────────
-                if is_rain:
-                    rain_rate = np.zeros_like(data)
-                    valid = data > 0
-                    z_linear = np.power(10.0, data[valid] / 10.0)
-                    rain_rate[valid] = np.power(z_linear / 200.0, 1.0 / 1.6)
-
-                    data_norm = np.clip(rain_rate / _PLUIE_MAX_RATE, 0, 1)
-                    indices = (data_norm * 255).astype(np.uint8)
-                    rgba = _PLUIE_CMAP_LUT[indices]
-
-                    zero_mask = rain_rate <= 0
-                    rgba[zero_mask] = [0, 0, 0, 0]
-                    if nodata_mask is not None:
-                        rgba[nodata_mask] = [0, 0, 0, 0]
-                    return rgba
-
-                # ── Radar band: Z-R transform + palette_radar_35 ────────────
+                # ── Radar band: Z-R transform (dBZ → mm/h) + palette_pluie ─
                 if band == "radar":
                     rain_rate = np.zeros_like(data)
                     valid = data > 0
                     z_linear = np.power(10.0, data[valid] / 10.0)
                     rain_rate[valid] = np.power(z_linear / 200.0, 1.0 / 1.6)
 
-                    data_norm = np.clip(rain_rate / _RADAR_MAX_RATE, 0, 1)
+                    # Logarithmic mapping: spreads low rain rates across LUT indices
+                    log_rate = np.log(np.clip(rain_rate, 0.01, _RADAR_MAX_RATE))
+                    data_norm = np.clip(
+                        (log_rate - _RADAR_LOG_MIN) / (_RADAR_LOG_MAX - _RADAR_LOG_MIN),
+                        0, 1,
+                    )
                     indices = (data_norm * 255).astype(np.uint8)
                     rgba = _RADAR_CMAP_LUT[indices]
 
@@ -1216,7 +1171,7 @@ async def get_point_forecast(
         raise HTTPException(status_code=500, detail=f"Error getting timestamps: {str(e)}")
 
     # Sample values at each timestep
-    is_rain = (band == "rain")
+    is_radar = (band == "radar")
     results = []
     for ts in timestamps[-18:]:  # Last 18 timesteps
         timestamp = ts["timestamp"]
@@ -1246,8 +1201,8 @@ async def get_point_forecast(
                         value = None
                     elif not np.isfinite(value):
                         value = None
-                    elif is_rain and value is not None:
-                        # Convert dBZ → mm/h for rain band
+                    elif is_radar and value is not None:
+                        # Convert dBZ → mm/h for radar band
                         value = round(dbz_to_mmh(float(value)), 2)
                 else:
                     value = None
@@ -1346,8 +1301,8 @@ async def get_preview(
             elif np.any(~np.isfinite(data)):
                 nodata_mask = ~np.isfinite(data)
 
-            # ── Rain band in preview: Z-R transform + palette_pluie ──
-            if band == "rain":
+            # ── Radar band in preview: Z-R transform + palette_pluie ──
+            if band == "radar":
                 rain_rate = np.zeros_like(data)
                 valid = data > 0
                 z_linear = np.power(10.0, data[valid] / 10.0)
@@ -1359,33 +1314,12 @@ async def get_preview(
                     pil_rr = pil_rr.resize((width, height), PILImage.Resampling.BILINEAR)
                     rain_rate = np.array(pil_rr)
 
-                data_norm = np.clip(rain_rate / _PLUIE_MAX_RATE, 0, 1)
-                indices = (data_norm * 255).astype(np.uint8)
-                rgba = _PLUIE_CMAP_LUT[indices]
-
-                zero_mask = rain_rate <= 0
-                rgba[zero_mask] = [0, 0, 0, 0]
-                if nodata_mask is not None:
-                    if nodata_mask.shape != (height, width):
-                        mask_img = PILImage.fromarray(nodata_mask.astype(np.uint8) * 255)
-                        mask_img = mask_img.resize((width, height), PILImage.Resampling.NEAREST)
-                        nodata_mask = np.array(mask_img) > 127
-                    rgba[nodata_mask] = [0, 0, 0, 0]
-
-            # ── Radar band in preview: Z-R transform + palette_radar_35 ──
-            elif band == "radar":
-                rain_rate = np.zeros_like(data)
-                valid = data > 0
-                z_linear = np.power(10.0, data[valid] / 10.0)
-                rain_rate[valid] = np.power(z_linear / 200.0, 1.0 / 1.6)
-
-                # Resize if needed
-                if rain_rate.shape != (height, width):
-                    pil_rr = PILImage.fromarray(rain_rate.astype(np.float32), mode='F')
-                    pil_rr = pil_rr.resize((width, height), PILImage.Resampling.BILINEAR)
-                    rain_rate = np.array(pil_rr)
-
-                data_norm = np.clip(rain_rate / _RADAR_MAX_RATE, 0, 1)
+                # Logarithmic mapping: spreads low rain rates across LUT indices
+                log_rate = np.log(np.clip(rain_rate, 0.01, _RADAR_MAX_RATE))
+                data_norm = np.clip(
+                    (log_rate - _RADAR_LOG_MIN) / (_RADAR_LOG_MAX - _RADAR_LOG_MIN),
+                    0, 1,
+                )
                 indices = (data_norm * 255).astype(np.uint8)
                 rgba = _RADAR_CMAP_LUT[indices]
 
