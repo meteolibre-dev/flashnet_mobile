@@ -105,6 +105,7 @@ else:
 import re
 import json
 import logging
+import math
 from typing import Dict, Optional, Set, Tuple
 from io import BytesIO
 from PIL import Image
@@ -138,6 +139,23 @@ from google.cloud import storage
 # Logging configuration
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+# Minimum dBZ to consider as rain. Below this threshold returns are typically
+# ground clutter, bugs, or virga that doesn't reach the surface.
+# NOAA/NWS standard: "20 dBZ is typically the point at which light rain begins."
+RAIN_MIN_DBZ: float = float(os.getenv("RAIN_MIN_DBZ", "20"))
+
+
+def dbz_to_mmh(dbz: float) -> float:
+    """Marshall-Palmer Z-R relationship: Z = 200·R^1.6 → R = (Z/200)^(1/1.6).
+    Converts radar reflectivity (dBZ) to rain rate (mm/h).
+    Values below RAIN_MIN_DBZ are treated as no rain (clutter / virga filter).
+    """
+    if dbz < RAIN_MIN_DBZ:
+        return 0.0
+    z = 10.0 ** (dbz / 10.0)
+    return (z / 200.0) ** (1.0 / 1.6)
 
 # Configuration
 app = FastAPI(
@@ -268,6 +286,13 @@ BANDS: Dict[str, BandConfig] = {
         colormap="turbo",  # Good for radar - green to red
         invert=False
     ),
+    "rain": BandConfig(
+        name="Rain Rate (mm/h)",
+        min=0,
+        max=50,  # mm/h typical range: 0-50
+        colormap="custom",  # Uses dedicated RAIN_CMAP_LUT
+        invert=False
+    ),
 }
 
 
@@ -353,13 +378,16 @@ def get_cog_url(timestamp: str, band: str, run_time: Optional[str] = None) -> st
     
     Args:
         timestamp: Forecast timestamp (YYYYMMDDHHMM)
-        band: Band name (lightning, radar, sat_ch0, ...)
+        band: Band name (lightning, radar, rain, sat_ch0, ...)
         run_time: Explicit run identifier (H5 subfolder name, e.g. "2026-04-20_08-20").
                   When provided, skips GCS bucket scanning and builds the path directly.
                   Acts as a cache-busting key: when a new forecast run lands,
                   the run_time changes → natural cache invalidation.
     """
     global _gcs_bucket_name
+    
+    # The 'rain' channel reads from the 'radar' COG and applies Z-R transform
+    source_band = "radar" if band == "rain" else band
     
     # Ensure bucket name is initialized (lazy initialization)
     if _gcs_bucket_name is None:
@@ -370,15 +398,15 @@ def get_cog_url(timestamp: str, band: str, run_time: Optional[str] = None) -> st
 
     # Use explicit run_time if provided (avoids GCS lookup entirely)
     if run_time:
-        return f"/vsigs/{_gcs_bucket_name}/forecasts/{date_folder}/{run_time}/forecast_{timestamp}_{band}.tiff"
+        return f"/vsigs/{_gcs_bucket_name}/forecasts/{date_folder}/{run_time}/forecast_{timestamp}_{source_band}.tiff"
 
     # Fallback: discover subfolder via GCS scan
     h5_subfolder = _find_h5_subfolder(timestamp)
     if h5_subfolder:
-        return f"/vsigs/{_gcs_bucket_name}/forecasts/{date_folder}/{h5_subfolder}/forecast_{timestamp}_{band}.tiff"
+        return f"/vsigs/{_gcs_bucket_name}/forecasts/{date_folder}/{h5_subfolder}/forecast_{timestamp}_{source_band}.tiff"
 
     # Fallback to flat layout for files uploaded before the subfolder change
-    return f"/vsigs/{_gcs_bucket_name}/forecasts/{date_folder}/forecast_{timestamp}_{band}.tiff"
+    return f"/vsigs/{_gcs_bucket_name}/forecasts/{date_folder}/forecast_{timestamp}_{source_band}.tiff"
 
 
 def verify_cog_file_ready(timestamp: str, band: str, max_retries: int = 3, retry_delay: float = 1.0) -> bool:
@@ -395,11 +423,13 @@ def verify_cog_file_ready(timestamp: str, band: str, max_retries: int = 3, retry
         get_gcs_client()
     
     date_folder = f"{timestamp[:4]}-{timestamp[4:6]}-{timestamp[6:8]}"
+    # rain reads from radar COG files
+    source_band = "radar" if band == "rain" else band
     h5_subfolder = _find_h5_subfolder(timestamp)
     if h5_subfolder:
-        blob_name = f"forecasts/{date_folder}/{h5_subfolder}/forecast_{timestamp}_{band}.tiff"
+        blob_name = f"forecasts/{date_folder}/{h5_subfolder}/forecast_{timestamp}_{source_band}.tiff"
     else:
-        blob_name = f"forecasts/{date_folder}/forecast_{timestamp}_{band}.tiff"
+        blob_name = f"forecasts/{date_folder}/forecast_{timestamp}_{source_band}.tiff"
 
     storage_client, bucket_name = get_gcs_client()
     bucket = storage_client.bucket(bucket_name)
@@ -452,6 +482,36 @@ LIGHTNING_CMAP = {
     3: (255, 100, 0, 230),  # Orange
     4: (255, 0, 0, 255),    # Red
 }
+
+# Rain rate colormap (mm/h) — classic weather-radar style:
+#   transparent → light blue → green → yellow → orange → red → magenta
+# Intensity stops (mm/h):  0   0.5   2    5    10    25    50+
+RAIN_CMAP_STOPS = np.array([
+    # rate_mmh,  R,   G,   B,   A
+    [  0.0,       0,   0,   0,   0],   # transparent (no rain)
+    [  0.1,     120, 180, 255,  60],   # very light drizzle — faint blue
+    [  0.5,     100, 200, 255, 120],   # light rain — light blue
+    [  2.0,      50, 200,  80, 170],   # moderate — green
+    [  5.0,     200, 220,  50, 200],   # moderate-heavy — yellow-green
+    [ 10.0,     255, 180,   0, 220],   # heavy — orange
+    [ 25.0,     255,  60,   0, 240],   # very heavy — red
+    [ 50.0,     200,   0, 200, 255],   # extreme — magenta
+], dtype=np.float64)
+
+# Pre-compute a 256-entry LUT for fast rendering
+_RAIN_CMAP_LUT = np.zeros((256, 4), dtype=np.uint8)
+for _i in range(1, 256):
+    # Map LUT index back to mm/h rate (0–50 range)
+    _rate = (_i / 255.0) * 50.0
+    # Find surrounding stops
+    _stops = RAIN_CMAP_STOPS
+    _idx = int(np.searchsorted(_stops[:, 0], _rate, side='right')) - 1
+    _idx = max(0, min(_idx, len(_stops) - 2))
+    _lo, _hi = _stops[_idx], _stops[_idx + 1]
+    _t = (_rate - _lo[0]) / (_hi[0] - _lo[0]) if _hi[0] != _lo[0] else 0.0
+    _t = np.clip(_t, 0, 1)
+    _RAIN_CMAP_LUT[_i] = (_lo[1:] * (1 - _t) + _hi[1:] * _t).astype(np.uint8)
+# Index 0 stays transparent (no rain)
 
 
 @app.get("/")
@@ -561,6 +621,9 @@ async def get_available_timesteps(
                 if ts not in timestamp_bands:
                     timestamp_bands[ts] = set()
                 timestamp_bands[ts].add(found_band)
+                # rain is derived from radar via Z-R transform
+                if found_band == "radar":
+                    timestamp_bands[ts].add("rain")
         elif flat_prefix_fallback:
             # Old flat layout: files directly under forecasts/YYYY-MM-DD/
             for blob in bucket.list_blobs(prefix=flat_prefix_fallback):
@@ -571,6 +634,8 @@ async def get_available_timesteps(
                 if ts not in timestamp_bands:
                     timestamp_bands[ts] = set()
                 timestamp_bands[ts].add(found_band)
+                if found_band == "radar":
+                    timestamp_bands[ts].add("rain")
 
         # Convert to sorted list with datetime info
         timestamps = []
@@ -803,6 +868,10 @@ def generate_tile_rgba(x: int, y: int, z: int, band: str, time: str, run_time: O
     
     config = BANDS[band]
     
+    # The 'rain' band reads radar data and applies Z-R transform
+    is_rain = (band == "rain")
+    source_band = "radar" if is_rain else band
+    
     # Retry logic for transient GCS/network errors
     max_retries = 3
     retry_delay = 0.5  # seconds
@@ -837,7 +906,31 @@ def generate_tile_rgba(x: int, y: int, z: int, band: str, time: str, run_time: O
                     nodata_mask = ~tile.mask.astype(bool)
                 elif np.any(~np.isfinite(data)):
                     nodata_mask = ~np.isfinite(data)
-                
+
+                # ── Rain band: apply Z-R transform (dBZ → mm/h) ──────────
+                if is_rain:
+                    # Vectorised Marshall-Palmer: Z = 200·R^1.6
+                    # Apply dBZ threshold: values below RAIN_MIN_DBZ are clutter/no-rain
+                    rain_rate = np.zeros_like(data)
+                    valid = data >= RAIN_MIN_DBZ
+                    z_linear = np.power(10.0, data[valid] / 10.0)
+                    rain_rate[valid] = np.power(z_linear / 200.0, 1.0 / 1.6)
+
+                    # Normalise to 0–255 using the band max (50 mm/h)
+                    data_norm = np.clip(rain_rate / config.max, 0, 1)
+                    indices = (data_norm * 255).astype(np.uint8)
+
+                    # Apply the pre-computed rain colour LUT
+                    rgba = _RAIN_CMAP_LUT[indices]
+
+                    # Zero rate → fully transparent
+                    zero_mask = rain_rate <= 0
+                    rgba[zero_mask] = [0, 0, 0, 0]
+                    if nodata_mask is not None:
+                        rgba[nodata_mask] = [0, 0, 0, 0]
+                    return rgba
+
+                # ── Default rendering for other bands ────────────────────
                 data = np.clip(data, config.min, config.max)
                 data = ((data - config.min) / (config.max - config.min) * 255).astype(np.uint8)
                 
@@ -1113,6 +1206,7 @@ async def get_point_forecast(
         raise HTTPException(status_code=500, detail=f"Error getting timestamps: {str(e)}")
 
     # Sample values at each timestep
+    is_rain = (band == "rain")
     results = []
     for ts in timestamps[-18:]:  # Last 18 timesteps
         timestamp = ts["timestamp"]
@@ -1142,6 +1236,9 @@ async def get_point_forecast(
                         value = None
                     elif not np.isfinite(value):
                         value = None
+                    elif is_rain and value is not None:
+                        # Convert dBZ → mm/h for rain band
+                        value = round(dbz_to_mmh(float(value)), 2)
                 else:
                     value = None
                     
@@ -1238,11 +1335,37 @@ async def get_preview(
                 nodata_mask = (data == cog.nodata) | (~np.isfinite(data))
             elif np.any(~np.isfinite(data)):
                 nodata_mask = ~np.isfinite(data)
-            
-            data = np.clip(data, config.min, config.max)
-            data = ((data - config.min) / (config.max - config.min) * 255).astype(np.uint8)
-            
-            if band == "lightning":
+
+            # ── Rain band in preview: Z-R transform ──────────────────
+            if band == "rain":
+                rain_rate = np.zeros_like(data)
+                valid = data >= RAIN_MIN_DBZ
+                z_linear = np.power(10.0, data[valid] / 10.0)
+                rain_rate[valid] = np.power(z_linear / 200.0, 1.0 / 1.6)
+
+                # Resize if needed
+                if rain_rate.shape != (height, width):
+                    pil_rr = PILImage.fromarray(rain_rate.astype(np.float32), mode='F')
+                    pil_rr = pil_rr.resize((width, height), PILImage.Resampling.BILINEAR)
+                    rain_rate = np.array(pil_rr)
+
+                data_norm = np.clip(rain_rate / config.max, 0, 1)
+                indices = (data_norm * 255).astype(np.uint8)
+                rgba = _RAIN_CMAP_LUT[indices]
+
+                zero_mask = rain_rate <= 0
+                rgba[zero_mask] = [0, 0, 0, 0]
+                if nodata_mask is not None:
+                    if nodata_mask.shape != (height, width):
+                        mask_img = PILImage.fromarray(nodata_mask.astype(np.uint8) * 255)
+                        mask_img = mask_img.resize((width, height), PILImage.Resampling.NEAREST)
+                        nodata_mask = np.array(mask_img) > 127
+                    rgba[nodata_mask] = [0, 0, 0, 0]
+
+            elif band == "lightning":
+                data = np.clip(data, config.min, config.max)
+                data = ((data - config.min) / (config.max - config.min) * 255).astype(np.uint8)
+
                 rgba = np.zeros((data.shape[0], data.shape[1], 4), dtype=np.uint8)
                 
                 for val, color in LIGHTNING_CMAP.items():
@@ -1257,6 +1380,9 @@ async def get_preview(
                     rgba[nodata_mask] = [0, 0, 0, 0]
             else:
                 from matplotlib import cm
+
+                data = np.clip(data, config.min, config.max)
+                data = ((data - config.min) / (config.max - config.min) * 255).astype(np.uint8)
                 
                 cmap = cm.get_cmap(config.colormap)
                 if config.invert:

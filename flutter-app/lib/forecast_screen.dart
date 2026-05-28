@@ -470,8 +470,9 @@ class _ForecastScreenState extends State<ForecastScreen> {
             Positioned(
               left: 0,
               top: 0,
-              bottom: 0,
-              child: Center(
+              bottom: 200,
+              child: Align(
+                alignment: Alignment.center,
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -497,6 +498,12 @@ class _ForecastScreenState extends State<ForecastScreen> {
                             letterSpacing: 1),
                       ),
                     ),
+                    // Intensity legend (only for rain/thunder)
+                    if (_selectedChannel.id == 'lightning' ||
+                        _selectedChannel.id == 'radar') ...[
+                      const SizedBox(height: 8),
+                      _buildInlineLegend(),
+                    ],
                   ],
                 ),
               ),
@@ -893,6 +900,76 @@ class _ForecastScreenState extends State<ForecastScreen> {
     );
   }
 
+  Widget _buildInlineLegend() {
+    final isRain = _selectedChannel.id == 'radar';
+    final gradientColors = isRain
+        ? const [
+            Color(0x0004E200), // transparent green (light)
+            Color(0xFF01A501), // green
+            Color(0xFFFFF700), // yellow
+            Color(0xFFFF9000), // orange
+            Color(0xFFFF0000), // red
+            Color(0xFFD70000), // dark red (heavy)
+          ]
+        : const [
+            Color(0x00FFFF00), // transparent yellow (low)
+            Color(0xFFFFFF00), // yellow
+            Color(0xFFFFA500), // orange
+            Color(0xFFFF4500), // orange-red
+            Color(0xFFFF0000), // red
+            Color(0xFF8B0000), // dark red (high)
+          ];
+    final label = isRain ? 'Rain' : 'Thunder';
+
+    return RotatedBox(
+      quarterTurns: 3,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.8),
+          borderRadius: const BorderRadius.only(
+            bottomLeft: Radius.circular(6),
+            bottomRight: Radius.circular(6),
+          ),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.15)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              label,
+              style: const TextStyle(
+                  color: Colors.white, fontSize: 9, fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(width: 6),
+            // Horizontal gradient bar (will be rotated vertical)
+            ClipRRect(
+              borderRadius: BorderRadius.circular(2),
+              child: Container(
+                width: 120,
+                height: 12,
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.centerLeft,
+                    end: Alignment.centerRight,
+                    colors: gradientColors,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 6),
+            const Text('Low',
+                style: TextStyle(color: Colors.white54, fontSize: 8)),
+            const Text(' → ',
+                style: TextStyle(color: Colors.white38, fontSize: 8)),
+            const Text('High',
+                style: TextStyle(color: Colors.white70, fontSize: 8)),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _iconButton({
     required Widget icon,
     VoidCallback? onTap,
@@ -923,8 +1000,8 @@ class _ForecastScreenState extends State<ForecastScreen> {
         decoration: BoxDecoration(
           color: color,
           borderRadius: const BorderRadius.only(
-            topLeft: Radius.circular(6),
-            topRight: Radius.circular(6),
+            bottomLeft: Radius.circular(6),
+            bottomRight: Radius.circular(6),
           ),
         ),
         child: child,
