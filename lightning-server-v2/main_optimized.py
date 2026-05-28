@@ -145,18 +145,11 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# Minimum dBZ to consider as rain. Below this threshold returns are typically
-# ground clutter, bugs, or virga that doesn't reach the surface.
-# NOAA/NWS standard: "20 dBZ is typically the point at which light rain begins."
-RAIN_MIN_DBZ: float = float(os.getenv("RAIN_MIN_DBZ", "20"))
-
-
 def dbz_to_mmh(dbz: float) -> float:
     """Marshall-Palmer Z-R relationship: Z = 200·R^1.6 → R = (Z/200)^(1/1.6).
     Converts radar reflectivity (dBZ) to rain rate (mm/h).
-    Values below RAIN_MIN_DBZ are treated as no rain (clutter / virga filter).
     """
-    if dbz < RAIN_MIN_DBZ:
+    if dbz <= 0:
         return 0.0
     z = 10.0 ** (dbz / 10.0)
     return (z / 200.0) ** (1.0 / 1.6)
@@ -916,7 +909,7 @@ def generate_tile_rgba(x: int, y: int, z: int, band: str, time: str, run_time: O
                 # ── Rain band: Z-R transform + palette_pluie ───────────────
                 if is_rain:
                     rain_rate = np.zeros_like(data)
-                    valid = data >= RAIN_MIN_DBZ
+                    valid = data > 0
                     z_linear = np.power(10.0, data[valid] / 10.0)
                     rain_rate[valid] = np.power(z_linear / 200.0, 1.0 / 1.6)
 
@@ -933,7 +926,7 @@ def generate_tile_rgba(x: int, y: int, z: int, band: str, time: str, run_time: O
                 # ── Radar band: Z-R transform + palette_radar_35 ────────────
                 if band == "radar":
                     rain_rate = np.zeros_like(data)
-                    valid = data >= RAIN_MIN_DBZ
+                    valid = data > 0
                     z_linear = np.power(10.0, data[valid] / 10.0)
                     rain_rate[valid] = np.power(z_linear / 200.0, 1.0 / 1.6)
 
@@ -1356,7 +1349,7 @@ async def get_preview(
             # ── Rain band in preview: Z-R transform + palette_pluie ──
             if band == "rain":
                 rain_rate = np.zeros_like(data)
-                valid = data >= RAIN_MIN_DBZ
+                valid = data > 0
                 z_linear = np.power(10.0, data[valid] / 10.0)
                 rain_rate[valid] = np.power(z_linear / 200.0, 1.0 / 1.6)
 
@@ -1382,7 +1375,7 @@ async def get_preview(
             # ── Radar band in preview: Z-R transform + palette_radar_35 ──
             elif band == "radar":
                 rain_rate = np.zeros_like(data)
-                valid = data >= RAIN_MIN_DBZ
+                valid = data > 0
                 z_linear = np.power(10.0, data[valid] / 10.0)
                 rain_rate[valid] = np.power(z_linear / 200.0, 1.0 / 1.6)
 
