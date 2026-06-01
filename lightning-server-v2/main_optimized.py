@@ -665,8 +665,7 @@ async def get_history(
         all_dates: list[str] = []
 
         for i in range(-1, days):
-            d = now + timedelta(days=-i) if i >= 0 else now + timedelta(days=i)
-            # Scan from oldest to newest
+            # i=-1 means tomorrow (forecasts may extend), i=0 is today, etc.
             d = now - timedelta(days=i)
             date_folder = d.strftime("%Y-%m-%d")
             date_prefix = f"forecasts/{date_folder}/"
@@ -1103,13 +1102,14 @@ def generate_tile_rgba(x: int, y: int, z: int, band: str, time: str, run_time: O
 @app.get("/tilejson")
 async def get_tilejson(
     band: str = Query(...),
-    time: str = Query(...)
+    time: str = Query(...),
+    run_time: Optional[str] = Query(None, description="Run identifier (H5 subfolder)")
 ):
     """Get TileJSON for map integration."""
     if band not in BANDS:
         raise HTTPException(status_code=400, detail=f"Invalid band: {band}")
 
-    url = get_cog_url(time, band)
+    url = get_cog_url(time, band, run_time=run_time)
 
     try:
         with rasterio.open(url) as cog:
@@ -1149,7 +1149,8 @@ async def get_tilejson(
 @app.get("/bounds")
 async def get_bounds(
     band: str = Query(...),
-    time: str = Query(...)
+    time: str = Query(...),
+    run_time: Optional[str] = Query(None, description="Run identifier (H5 subfolder)")
 ):
     """Get geographic bounds for a COG."""
     if band not in BANDS:
@@ -1159,7 +1160,7 @@ async def get_bounds(
     default_bounds = [-10.0, 33.0, 33.0, 65.0]  # [west, south, east, north]
 
     try:
-        url = get_cog_url(time, band)
+        url = get_cog_url(time, band, run_time=run_time)
     except Exception as e:
         # COG URL generation failed - return default bounds
         return JSONResponse({
@@ -1234,13 +1235,14 @@ async def get_bounds(
 @app.get("/info")
 async def get_info(
     band: str = Query(...),
-    time: str = Query(...)
+    time: str = Query(...),
+    run_time: Optional[str] = Query(None, description="Run identifier (H5 subfolder)")
 ):
     """Get detailed COG metadata."""
     if band not in BANDS:
         raise HTTPException(status_code=400, detail=f"Invalid band: {band}")
 
-    url = get_cog_url(time, band)
+    url = get_cog_url(time, band, run_time=run_time)
 
     try:
         with rasterio.open(url) as cog:
