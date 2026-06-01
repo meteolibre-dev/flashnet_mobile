@@ -640,6 +640,136 @@ async def get_available_timesteps(
         raise HTTPException(status_code=500, detail=f"Error scanning bucket: {str(e)}")
 
 
+@app.get("/history")
+async def get_history(
+    days: int = Query(7, ge=1, le=30, description="Number of days to scan back from today"),
+    band: str = Query("lightning", description="Band to check for availability")
+):
+    """
+    Scan the GCS bucket for ALL historical forecast runs.
+    Unlike /available which only returns the latest run, this endpoint
+    returns every run found across the scanned day range, grouped by date.
+    This enables a "backtime" browser to visualize past forecasts.
+    
+    Returns:
+        runs: list of { run_time, date_folder, timestamps: [...] }
+        dates: list of date strings that have data
+    """
+    try:
+        storage_client, bucket_name = get_gcs_client()
+        bucket = storage_client.bucket(bucket_name)
+
+        now = datetime.utcnow()
+        # Collect runs grouped by date
+        runs_by_date: Dict[str, list] = {}  # date_folder -> list of run info
+        all_dates: list[str] = []
+
+        for i in range(-1, days):
+            d = now + timedelta(days=-i) if i >= 0 else now + timedelta(days=i)
+            # Scan from oldest to newest
+            d = now - timedelta(days=i)
+            date_folder = d.strftime("%Y-%m-%d")
+            date_prefix = f"forecasts/{date_folder}/"
+
+            # List subfolders (runs) for this date
+            iterator = bucket.list_blobs(prefix=date_prefix, delimiter="/")
+            for _ in iterator:
+                pass
+
+            run_subfolders = []
+            for prefix in iterator.prefixes:
+                sub = prefix.rstrip("/").split("/")[-1]
+                run_subfolders.append(sub)
+
+            if not run_subfolders:
+                # Check for flat layout (old format)
+                has_flat = False
+                for blob in bucket.list_blobs(prefix=date_prefix, max_results=5):
+                    m = re.search(r"forecast_(\d{12})_[^.]+\.tiff$", blob.name)
+                    if m:
+                        has_flat = True
+                        break
+                if has_flat:
+                    # Flat layout - collect timestamps
+                    timestamps = []
+                    for blob in bucket.list_blobs(prefix=date_prefix):
+                        m = re.search(r"forecasts/[^/]+/forecast_(\d{12})_([^.]+)\.tiff$", blob.name)
+                        if not m:
+                            continue
+                        ts, found_band = m.group(1), m.group(2)
+                        if band != "any" and found_band != band:
+                            continue
+                        timestamps.append(ts)
+                    if timestamps:
+                        all_dates.append(date_folder)
+                        runs_by_date[date_folder] = [{
+                            "run_time": None,
+                            "date_folder": date_folder,
+                            "timestamps": sorted(set(timestamps)),
+                        }]
+                continue
+
+            # New layout: iterate each run subfolder
+            date_runs = []
+            for sub in sorted(run_subfolders):
+                run_prefix = f"forecasts/{date_folder}/{sub}/"
+                timestamps = []
+                for blob in bucket.list_blobs(prefix=run_prefix):
+                    m = re.search(r"forecast_(\d{12})_([^.]+)\.tiff$", blob.name)
+                    if not m:
+                        continue
+                    ts, found_band = m.group(1), m.group(2)
+                    if band != "any" and found_band != band:
+                        continue
+                    timestamps.append(ts)
+                if timestamps:
+                    date_runs.append({
+                        "run_time": sub,
+                        "date_folder": date_folder,
+                        "timestamps": sorted(set(timestamps)),
+                    })
+
+            if date_runs:
+                all_dates.append(date_folder)
+                runs_by_date[date_folder] = date_runs
+
+        # Build flat list of runs with enriched timestamp info
+        all_runs = []
+        for date_folder in sorted(all_dates):
+            for run_info in runs_by_date.get(date_folder, []):
+                enriched_timestamps = []
+                for ts in run_info["timestamps"]:
+                    try:
+                        year, month, day = ts[0:4], ts[4:6], ts[6:8]
+                        hour, minute = ts[8:10], ts[10:12]
+                        dt = datetime(int(year), int(month), int(day), int(hour), int(minute))
+                        enriched_timestamps.append({
+                            "timestamp": ts,
+                            "datetime": dt.isoformat() + "Z",
+                            "date_folder": date_folder,
+                            "run_time": run_info["run_time"],
+                        })
+                    except ValueError:
+                        continue
+                if enriched_timestamps:
+                    all_runs.append({
+                        "run_time": run_info["run_time"],
+                        "date_folder": date_folder,
+                        "timestamps": enriched_timestamps,
+                        "count": len(enriched_timestamps),
+                    })
+
+        return {
+            "runs": all_runs,
+            "dates": sorted(all_dates),
+            "total_runs": len(all_runs),
+            "total_timesteps": sum(r["count"] for r in all_runs),
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error scanning bucket history: {str(e)}")
+
+
 @app.get("/times/{timestamp}")
 async def check_timestamp(timestamp: str):
     """Check which bands are available for a timestamp."""
