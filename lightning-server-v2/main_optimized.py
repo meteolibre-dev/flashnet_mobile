@@ -659,6 +659,7 @@ async def get_available_timesteps(
                 # when the run date ≠ timestamp date).
                 if all_run_subfolders and latest_sub:
                     run_date = _extract_run_date(latest_sub)
+                    ts_date_folder = run_date
                     tiff_url = f"https://storage.googleapis.com/{_gcs_bucket_name}/forecasts/{run_date}/{latest_sub}/forecast_{ts}_{{band}}.tiff"
                 else:
                     ts_date_folder = run_date_folder if run_date_folder else f"{year}-{month}-{day}"
