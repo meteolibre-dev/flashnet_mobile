@@ -203,11 +203,25 @@ def get_gcs_client():
     return _gcs_client, _gcs_bucket_name
 
 
+def _extract_run_date(run_time: str) -> str:
+    """Extract the date portion from a run_time string.
+
+    run_time format: 'YYYY-MM-DD_HH-MM_region' (e.g. '2026-06-05_21-50_europe')
+    Returns: 'YYYY-MM-DD' (e.g. '2026-06-05')
+    """
+    return run_time.split("_")[0]
+
+
 def _find_h5_subfolder(timestamp: str) -> Optional[str]:
     """Find the H5 datetime subfolder for a given forecast timestamp.
 
     New bucket layout:
         forecasts/YYYY-MM-DD/{h5_datetime}/forecast_YYYYMMDDHHMM_band.tiff
+
+    A forecast run on date D can contain timestamps for date D+1 (or even D+2).
+    Therefore we search the date folder matching the timestamp AND the two
+    previous day folders (the run that produced this timestamp may have started
+    on a different calendar day).
 
     Checks the in-memory cache first, then scans GCS if needed.
     Returns None if no matching subfolder is found (falls back to old flat layout).
@@ -215,20 +229,30 @@ def _find_h5_subfolder(timestamp: str) -> Optional[str]:
     if timestamp in _timestamp_to_h5_subfolder:
         return _timestamp_to_h5_subfolder[timestamp]
 
-    date_folder = f"{timestamp[:4]}-{timestamp[4:6]}-{timestamp[6:8]}"
+    ts_date = f"{timestamp[:4]}-{timestamp[4:6]}-{timestamp[6:8]}"
+    ts_dt = datetime.strptime(ts_date, "%Y-%m-%d")
+
+    # Search the timestamp's own date folder and the two previous days
+    # (a forecast run started 1–2 days earlier can produce this timestamp)
+    search_dates = [
+        (ts_dt - timedelta(days=offset)).strftime("%Y-%m-%d")
+        for offset in range(3)  # 0, 1, 2 days back
+    ]
+
     try:
         storage_client, bucket_name = get_gcs_client()
         bucket = storage_client.bucket(bucket_name)
-        prefix = f"forecasts/{date_folder}/"
-        for blob in bucket.list_blobs(prefix=prefix):
-            # New path: forecasts/YYYY-MM-DD/h5_subfolder/forecast_YYYYMMDDHHMM_band.tiff
-            match = re.search(
-                r"forecasts/[^/]+/([^/]+)/forecast_(\d{12})_[^.]+\.tiff$", blob.name
-            )
-            if match and match.group(2) == timestamp:
-                subfolder = match.group(1)
-                _timestamp_to_h5_subfolder[timestamp] = subfolder
-                return subfolder
+        for date_folder in search_dates:
+            prefix = f"forecasts/{date_folder}/"
+            for blob in bucket.list_blobs(prefix=prefix):
+                # New path: forecasts/YYYY-MM-DD/h5_subfolder/forecast_YYYYMMDDHHMM_band.tiff
+                match = re.search(
+                    r"forecasts/[^/]+/([^/]+)/forecast_(\d{12})_[^.]+\.tiff$", blob.name
+                )
+                if match and match.group(2) == timestamp:
+                    subfolder = match.group(1)
+                    _timestamp_to_h5_subfolder[timestamp] = subfolder
+                    return subfolder
     except Exception as e:
         logger.warning(f"Could not scan GCS for h5 subfolder of {timestamp}: {e}")
 
@@ -378,20 +402,24 @@ def get_cog_url(timestamp: str, band: str, run_time: Optional[str] = None) -> st
     # Ensure bucket name is initialized (lazy initialization)
     if _gcs_bucket_name is None:
         get_gcs_client()
-    
-    # Convert YYYYMMDD to YYYY-MM-DD for bucket path
-    date_folder = f"{timestamp[:4]}-{timestamp[4:6]}-{timestamp[6:8]}"
 
-    # Use explicit run_time if provided (avoids GCS lookup entirely)
+    # When run_time is provided, derive the date folder from the run_time
+    # (not the timestamp).  A forecast run started on 2026-06-05 can produce
+    # timestamps on 2026-06-06, but the files still live under forecasts/2026-06-05/.
     if run_time:
-        return f"/vsigs/{_gcs_bucket_name}/forecasts/{date_folder}/{run_time}/forecast_{timestamp}_{band}.tiff"
+        run_date = _extract_run_date(run_time)
+        return f"/vsigs/{_gcs_bucket_name}/forecasts/{run_date}/{run_time}/forecast_{timestamp}_{band}.tiff"
 
     # Fallback: discover subfolder via GCS scan
     h5_subfolder = _find_h5_subfolder(timestamp)
     if h5_subfolder:
-        return f"/vsigs/{_gcs_bucket_name}/forecasts/{date_folder}/{h5_subfolder}/forecast_{timestamp}_{band}.tiff"
+        # The h5_subfolder tells us which run produced this timestamp;
+        # extract the run's start date from the subfolder name.
+        run_date = _extract_run_date(h5_subfolder)
+        return f"/vsigs/{_gcs_bucket_name}/forecasts/{run_date}/{h5_subfolder}/forecast_{timestamp}_{band}.tiff"
 
     # Fallback to flat layout for files uploaded before the subfolder change
+    date_folder = f"{timestamp[:4]}-{timestamp[4:6]}-{timestamp[6:8]}"
     return f"/vsigs/{_gcs_bucket_name}/forecasts/{date_folder}/forecast_{timestamp}_{band}.tiff"
 
 
@@ -407,12 +435,13 @@ def verify_cog_file_ready(timestamp: str, band: str, max_retries: int = 3, retry
     
     if _gcs_bucket_name is None:
         get_gcs_client()
-    
-    date_folder = f"{timestamp[:4]}-{timestamp[4:6]}-{timestamp[6:8]}"
+
     h5_subfolder = _find_h5_subfolder(timestamp)
     if h5_subfolder:
-        blob_name = f"forecasts/{date_folder}/{h5_subfolder}/forecast_{timestamp}_{band}.tiff"
+        run_date = _extract_run_date(h5_subfolder)
+        blob_name = f"forecasts/{run_date}/{h5_subfolder}/forecast_{timestamp}_{band}.tiff"
     else:
+        date_folder = f"{timestamp[:4]}-{timestamp[4:6]}-{timestamp[6:8]}"
         blob_name = f"forecasts/{date_folder}/forecast_{timestamp}_{band}.tiff"
 
     storage_client, bucket_name = get_gcs_client()
@@ -610,6 +639,12 @@ async def get_available_timesteps(
                 timestamp_bands[ts].add(found_band)
 
         # Convert to sorted list with datetime info
+        # Determine the actual date_folder (where data lives on GCS) from the run.
+        # A forecast started on 2026-06-05 may produce timestamps for 2026-06-06,
+        # but those files still live under forecasts/2026-06-05/.  The frontend
+        # uses date_folder to build direct download URLs, so it must match the
+        # GCS location — not the timestamp's calendar date.
+        run_date_folder = _extract_run_date(latest_sub) if all_run_subfolders and latest_sub else None
         timestamps = []
         for ts, bands in sorted(timestamp_bands.items()):
             try:
@@ -619,12 +654,22 @@ async def get_available_timesteps(
                 hour = ts[8:10]
                 minute = ts[10:12]
                 dt = datetime(int(year), int(month), int(day), int(hour), int(minute))
+                # Build the full direct-download URL so frontends don't
+                # need to construct it themselves (avoids cross-midnight bugs
+                # when the run date ≠ timestamp date).
+                if all_run_subfolders and latest_sub:
+                    run_date = _extract_run_date(latest_sub)
+                    tiff_url = f"https://storage.googleapis.com/{_gcs_bucket_name}/forecasts/{run_date}/{latest_sub}/forecast_{ts}_{{band}}.tiff"
+                else:
+                    ts_date_folder = run_date_folder if run_date_folder else f"{year}-{month}-{day}"
+                    tiff_url = f"https://storage.googleapis.com/{_gcs_bucket_name}/forecasts/{ts_date_folder}/forecast_{ts}_{{band}}.tiff"
                 timestamps.append({
                     "timestamp": ts,
                     "datetime": dt.isoformat() + "Z",
-                    "date_folder": f"{year}-{month}-{day}",
+                    "date_folder": ts_date_folder,
                     "available_bands": list(bands),
-                    "run_time": latest_sub if all_run_subfolders else None
+                    "run_time": latest_sub if all_run_subfolders else None,
+                    "tiff_url": tiff_url,
                 })
             except ValueError:
                 continue
@@ -695,8 +740,11 @@ async def get_history_date_runs(
     band: str = Query("lightning", description="Band to check for availability"),
 ):
     """
-    Get all forecast runs for a specific date.
-    Scans only one day's folder, so it's fast.
+    Get all forecast runs whose timestamps fall on a specific date.
+
+    Because a forecast run started on day D can produce timestamps for day D+1
+    (or D+2), this endpoint also scans the 2 previous days' folders and filters
+    for timestamps matching the requested date.
 
     Args:
         date: Date in YYYY-MM-DD format (e.g. "2026-06-01")
@@ -704,7 +752,7 @@ async def get_history_date_runs(
 
     Returns:
         date: the requested date
-        runs: list of { run_time, timestamps: [...], available_bands: [...] }
+        runs: list of { run_time, date_folder, timestamps: [...], available_bands: [...] }
     """
     # Validate date format
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
@@ -719,98 +767,118 @@ async def get_history_date_runs(
         storage_client, bucket_name = get_gcs_client()
         bucket = storage_client.bucket(bucket_name)
 
-        date_prefix = f"forecasts/{date}/"
-
-        # Step 1: list run subfolders for this date
-        iterator = bucket.list_blobs(prefix=date_prefix, delimiter="/")
-        for _ in iterator:
-            pass
-
-        run_subfolders = []
-        for prefix in iterator.prefixes:
-            sub = prefix.rstrip("/").split("/")[-1]
-            run_subfolders.append(sub)
+        # Scan the requested date + 2 previous days (forecasts from those days
+        # can produce timestamps that fall on the requested date)
+        requested_dt = datetime.strptime(date, "%Y-%m-%d")
+        scan_dates = [
+            (requested_dt - timedelta(days=offset)).strftime("%Y-%m-%d")
+            for offset in range(3)  # 0, 1, 2 days back
+        ]
 
         runs = []
 
-        if not run_subfolders:
-            # Flat layout (old format) — files directly under date folder
-            ts_bands: Dict[str, Set[str]] = {}
-            for blob in bucket.list_blobs(prefix=date_prefix):
-                m = re.search(r"forecasts/[^/]+/forecast_(\d{12})_([^.]+)\.tiff$", blob.name)
-                if not m:
-                    continue
-                ts, found_band = m.group(1), m.group(2)
-                if band != "any" and found_band != band:
-                    continue
-                if ts not in ts_bands:
-                    ts_bands[ts] = set()
-                ts_bands[ts].add(found_band)
+        for scan_date in scan_dates:
+            date_prefix = f"forecasts/{scan_date}/"
 
-            if ts_bands:
-                timestamps = []
-                for ts in sorted(ts_bands.keys()):
-                    try:
-                        year, month, day = ts[0:4], ts[4:6], ts[6:8]
-                        hour, minute = ts[8:10], ts[10:12]
-                        dt = datetime(int(year), int(month), int(day), int(hour), int(minute))
-                        timestamps.append({
-                            "timestamp": ts,
-                            "datetime": dt.isoformat() + "Z",
-                            "available_bands": list(ts_bands[ts]),
-                        })
-                    except ValueError:
-                        continue
-                if timestamps:
-                    runs.append({
-                        "run_time": None,
-                        "date_folder": date,
-                        "timestamps": timestamps,
-                        "count": len(timestamps),
-                        "available_bands": list(set(b for bs in ts_bands.values() for b in bs)),
-                    })
-        else:
-            # New layout: each subfolder is a run
-            for sub in sorted(run_subfolders):
-                run_prefix = f"forecasts/{date}/{sub}/"
+            # Step 1: list run subfolders for this scan_date
+            iterator = bucket.list_blobs(prefix=date_prefix, delimiter="/")
+            for _ in iterator:
+                pass
+
+            run_subfolders = []
+            for prefix in iterator.prefixes:
+                sub = prefix.rstrip("/").split("/")[-1]
+                run_subfolders.append(sub)
+
+            if not run_subfolders:
+                # Flat layout (old format) — files directly under date folder
                 ts_bands: Dict[str, Set[str]] = {}
-                for blob in bucket.list_blobs(prefix=run_prefix):
-                    m = re.search(r"forecast_(\d{12})_([^.]+)\.tiff$", blob.name)
+                for blob in bucket.list_blobs(prefix=date_prefix):
+                    m = re.search(r"forecasts/[^/]+/forecast_(\d{12})_([^.]+)\.tiff$", blob.name)
                     if not m:
                         continue
                     ts, found_band = m.group(1), m.group(2)
+                    # Only include timestamps that fall on the REQUESTED date
+                    ts_date = f"{ts[0:4]}-{ts[4:6]}-{ts[6:8]}"
+                    if ts_date != date:
+                        continue
                     if band != "any" and found_band != band:
                         continue
                     if ts not in ts_bands:
                         ts_bands[ts] = set()
                     ts_bands[ts].add(found_band)
 
-                timestamps = []
-                for ts in sorted(ts_bands.keys()):
-                    try:
-                        year, month, day = ts[0:4], ts[4:6], ts[6:8]
-                        hour, minute = ts[8:10], ts[10:12]
-                        dt = datetime(int(year), int(month), int(day), int(hour), int(minute))
-                        timestamps.append({
-                            "timestamp": ts,
-                            "datetime": dt.isoformat() + "Z",
-                            "run_time": sub,
-                            "date_folder": date,
-                            "available_bands": list(ts_bands[ts]),
+                if ts_bands:
+                    timestamps = []
+                    for ts in sorted(ts_bands.keys()):
+                        try:
+                            year, month, day = ts[0:4], ts[4:6], ts[6:8]
+                            hour, minute = ts[8:10], ts[10:12]
+                            dt = datetime(int(year), int(month), int(day), int(hour), int(minute))
+                            timestamps.append({
+                                "timestamp": ts,
+                                "datetime": dt.isoformat() + "Z",
+                                "available_bands": list(ts_bands[ts]),
+                                "tiff_url": f"https://storage.googleapis.com/{_gcs_bucket_name}/forecasts/{scan_date}/forecast_{ts}_{{band}}.tiff",
+                            })
+                        except ValueError:
+                            continue
+                    if timestamps:
+                        runs.append({
+                            "run_time": None,
+                            "date_folder": scan_date,
+                            "timestamps": timestamps,
+                            "count": len(timestamps),
+                            "available_bands": list(set(b for bs in ts_bands.values() for b in bs)),
                         })
-                        # Cache h5 subfolder mapping
-                        _timestamp_to_h5_subfolder[ts] = sub
-                    except ValueError:
-                        continue
+            else:
+                # New layout: each subfolder is a run
+                for sub in sorted(run_subfolders):
+                    run_prefix = f"forecasts/{scan_date}/{sub}/"
+                    ts_bands: Dict[str, Set[str]] = {}
+                    for blob in bucket.list_blobs(prefix=run_prefix):
+                        m = re.search(r"forecast_(\d{12})_([^.]+)\.tiff$", blob.name)
+                        if not m:
+                            continue
+                        ts, found_band = m.group(1), m.group(2)
+                        # Only include timestamps that fall on the REQUESTED date
+                        ts_date = f"{ts[0:4]}-{ts[4:6]}-{ts[6:8]}"
+                        if ts_date != date:
+                            continue
+                        if band != "any" and found_band != band:
+                            continue
+                        if ts not in ts_bands:
+                            ts_bands[ts] = set()
+                        ts_bands[ts].add(found_band)
 
-                if timestamps:
-                    runs.append({
-                        "run_time": sub,
-                        "date_folder": date,
-                        "timestamps": timestamps,
-                        "count": len(timestamps),
-                        "available_bands": list(set(b for bs in ts_bands.values() for b in bs)),
-                    })
+                    timestamps = []
+                    for ts in sorted(ts_bands.keys()):
+                        try:
+                            year, month, day = ts[0:4], ts[4:6], ts[6:8]
+                            hour, minute = ts[8:10], ts[10:12]
+                            dt = datetime(int(year), int(month), int(day), int(hour), int(minute))
+                            tiff_url = f"https://storage.googleapis.com/{_gcs_bucket_name}/forecasts/{scan_date}/{sub}/forecast_{ts}_{{band}}.tiff"
+                            timestamps.append({
+                                "timestamp": ts,
+                                "datetime": dt.isoformat() + "Z",
+                                "run_time": sub,
+                                "date_folder": scan_date,  # actual GCS folder, not requested date
+                                "available_bands": list(ts_bands[ts]),
+                                "tiff_url": tiff_url,
+                            })
+                            # Cache h5 subfolder mapping — also store the correct date folder
+                            _timestamp_to_h5_subfolder[ts] = sub
+                        except ValueError:
+                            continue
+
+                    if timestamps:
+                        runs.append({
+                            "run_time": sub,
+                            "date_folder": scan_date,  # actual GCS folder
+                            "timestamps": timestamps,
+                            "count": len(timestamps),
+                            "available_bands": list(set(b for bs in ts_bands.values() for b in bs)),
+                        })
 
         return {
             "date": date,
