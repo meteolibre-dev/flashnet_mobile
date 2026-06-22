@@ -124,7 +124,7 @@ import threading
 
 import numpy as np
 import requests
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, Query, HTTPException, Request
 from fastapi.responses import Response, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -167,6 +167,32 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def cache_control_middleware(request: Request, call_next):
+    """Set Cache-Control headers so Cloud CDN (USE_ORIGIN_HEADERS mode)
+    can cache metadata endpoints at the edge.
+
+    Tiles already set their own headers in get_tile_png(), so we skip them here.
+    Query params (band/time/run_time/lat/lon) are part of the URL and thus part
+    of the CDN cache key — caching is therefore per-forecast, never cross-user.
+    """
+    response = await call_next(request)
+    path = request.url.path
+
+    if path.startswith("/tiles/"):
+        return response  # tile handler sets its own Cache-Control
+    if path in ("/", "/health") or path.startswith("/debug") or path == "/cache/clear":
+        response.headers["Cache-Control"] = "no-store"
+    elif path == "/available" or path.startswith("/history"):
+        # Discovers the latest run; keep short so a new run shows up within 60s.
+        # One origin hit per 60s per edge POP instead of once per page view.
+        response.headers["Cache-Control"] = "public, max-age=60"
+    elif path in ("/bounds", "/info", "/tilejson", "/bands", "/times", "/point", "/preview"):
+        # Keyed by band/time/run_time → safe to cache like tiles.
+        response.headers["Cache-Control"] = "public, max-age=300"
+    return response
 
 # Environment variables
 # Use gs:// for private buckets (requires GCS credentials), https:// for public buckets
