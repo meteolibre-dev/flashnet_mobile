@@ -387,16 +387,27 @@ def _cache_invalidate(run_time: Optional[str] = None) -> int:
 
 
 # Pre-computed colormaps at startup (avoid recreating per tile)
-from matplotlib import cm as matplotlib_cm
 import matplotlib
 
 # Force matplotlib to use non-interactive backend
 matplotlib.use('Agg')
 
+# Colormap accessor compatible with matplotlib >= 3.5.
+# matplotlib.cm.get_cmap() was deprecated in 3.7 and REMOVED in 3.9; the
+# official replacement is the matplotlib.colormaps registry (3.5+) or
+# matplotlib.colormaps.get_cmap() (3.7+). The shim supports any version so a
+# Docker rebuild pulling a newer matplotlib can't break the server again.
+def _get_cmap(name: str):
+    try:
+        return matplotlib.colormaps[name]          # matplotlib >= 3.5 (preferred)
+    except (KeyError, AttributeError):
+        from matplotlib import cm as _cm
+        return _cm.get_cmap(name)                   # matplotlib < 3.5 (defensive)
+
 PRECOMPUTED_COLORMAPS: Dict[str, np.ndarray] = {}
 for band_name, config in BANDS.items():
     if config.colormap != "custom":
-        cmap = matplotlib_cm.get_cmap(config.colormap)
+        cmap = _get_cmap(config.colormap)
         if config.invert:
             cmap = cmap.reversed()
         # Pre-compute colormap as 256x4 array (RGBA)
@@ -1204,8 +1215,7 @@ def generate_tile_rgba(x: int, y: int, z: int, band: str, time: str, run_time: O
                         rgba = cmap[indices]
                     else:
                         # Fallback to dynamic colormap if not pre-computed
-                        from matplotlib import cm
-                        cmap = cm.get_cmap(config.colormap)
+                        cmap = _get_cmap(config.colormap)
                         if config.invert:
                             cmap = cmap.reversed()
                         normalized = data.astype(float) / 255.0
@@ -1634,12 +1644,10 @@ async def get_preview(
                 if nodata_mask is not None:
                     rgba[nodata_mask] = [0, 0, 0, 0]
             else:
-                from matplotlib import cm
-
                 data = np.clip(data, config.min, config.max)
                 data = ((data - config.min) / (config.max - config.min) * 255).astype(np.uint8)
                 
-                cmap = cm.get_cmap(config.colormap)
+                cmap = _get_cmap(config.colormap)
                 if config.invert:
                     cmap = cmap.reversed()
                 
