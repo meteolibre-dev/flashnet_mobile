@@ -580,6 +580,18 @@ async def root():
     }
 
 
+@app.get("/health")
+async def health():
+    """Lightweight liveness/readiness probe.
+
+    Intentionally does NO GCS work so it stays <5ms regardless of load —
+    suitable for Cloud Run health checks and uptime monitoring. The presence
+    of a 200 response proves the FastAPI app booted and the event loop is
+    serving requests.
+    """
+    return {"status": "ok", "service": "lightning-server-v2", "version": "2.0.0"}
+
+
 @app.get("/bands")
 async def list_bands():
     """List available bands."""
