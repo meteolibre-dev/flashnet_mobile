@@ -163,6 +163,12 @@ func getCOGInfo(url string) (*COGInfo, error) {
 
 // readTile reads a tileSize×tileSize float32 window from the COG covering z/x/y.
 // GDAL handles overview selection and resampling automatically via GDALRasterIO.
+//
+// For tiles that partially overlap the raster, we read ONLY the valid portion
+// at its proportional output size and place it at the correct offset within
+// the tileSize×tileSize buffer. The rest is filled with NaN (transparent).
+// This avoids the "stretching" bug where clamped data gets stretched to fill
+// the entire tile, and avoids passing negative offsets to GDAL (which fails).
 func readTile(url string, z, x, y, tileSize int) ([]float32, *float64, error) {
 	ds, err := cogPool.Open(url)
 	if err != nil {
@@ -177,43 +183,74 @@ func readTile(url string, z, x, y, tileSize int) ([]float32, *float64, error) {
 	minLon, minLat, maxLon, maxLat := tileBoundsWGS84(z, x, y)
 
 	// Convert geographic bounds → pixel coordinates
-	// gt = [originX, pixelWidth, 0, originY, 0, pixelHeight] (non-rotated)
 	srcX1 := (minLon - gt[0]) / gt[1]
 	srcX2 := (maxLon - gt[0]) / gt[1]
-	srcY1 := (maxLat - gt[3]) / gt[5] // maxLat → top of tile
-	srcY2 := (minLat - gt[3]) / gt[5] // minLat → bottom of tile
+	srcY1 := (maxLat - gt[3]) / gt[5]
+	srcY2 := (minLat - gt[3]) / gt[5]
 
-	srcXOff := int(math.Floor(math.Min(srcX1, srcX2)))
-	srcYOff := int(math.Floor(math.Min(srcY1, srcY2)))
-	srcXEnd := int(math.Ceil(math.Max(srcX1, srcX2)))
-	srcYEnd := int(math.Ceil(math.Max(srcY1, srcY2)))
+	fullXOff := math.Floor(math.Min(srcX1, srcX2))
+	fullYOff := math.Floor(math.Min(srcY1, srcY2))
+	fullXEnd := math.Ceil(math.Max(srcX1, srcX2))
+	fullYEnd := math.Ceil(math.Max(srcY1, srcY2))
+	fullW := fullXEnd - fullXOff
+	fullH := fullYEnd - fullYOff
 
-	srcW := srcXEnd - srcXOff
-	srcH := srcYEnd - srcYOff
-
-	// Clamp to raster bounds
-	if srcXOff < 0 {
-		srcW += srcXOff
-		srcXOff = 0
-	}
-	if srcYOff < 0 {
-		srcH += srcYOff
-		srcYOff = 0
-	}
-	if srcXOff+srcW > width {
-		srcW = width - srcXOff
-	}
-	if srcYOff+srcH > height {
-		srcH = height - srcYOff
-	}
-
+	// Initialize the full output buffer with NaN (transparent)
 	buf := make([]float32, tileSize*tileSize)
+	for i := range buf {
+		buf[i] = float32(math.NaN())
+	}
 
-	if srcW <= 0 || srcH <= 0 {
-		// Tile is entirely outside the raster — return NaN-filled
-		for i := range buf {
-			buf[i] = float32(math.NaN())
-		}
+	// Check if tile is entirely outside the raster
+	if fullXEnd <= 0 || fullYEnd <= 0 || fullXOff >= float64(width) || fullYOff >= float64(height) {
+		return buf, nil, nil
+	}
+
+	// Compute the valid (clamped) region within the raster
+	validXOff := math.Max(0, fullXOff)
+	validYOff := math.Max(0, fullYOff)
+	validXEnd := math.Min(float64(width), fullXEnd)
+	validYEnd := math.Min(float64(height), fullYEnd)
+	validW := validXEnd - validXOff
+	validH := validYEnd - validYOff
+
+	if validW <= 0 || validH <= 0 {
+		return buf, nil, nil
+	}
+
+	// Scale factor: how many output pixels per source pixel
+	scaleX := float64(tileSize) / fullW
+	scaleY := float64(tileSize) / fullH
+
+	// Where in the output buffer does the valid region start?
+	outXOff := int(math.Round((validXOff - fullXOff) * scaleX))
+	outYOff := int(math.Round((validYOff - fullYOff) * scaleY))
+	// How many output pixels does the valid region cover?
+	outW := int(math.Round(validW * scaleX))
+	outH := int(math.Round(validH * scaleY))
+	if outW < 1 {
+		outW = 1
+	}
+	if outH < 1 {
+		outH = 1
+	}
+	// Clamp output region to tile bounds
+	if outXOff < 0 {
+		outW += outXOff
+		outXOff = 0
+	}
+	if outYOff < 0 {
+		outH += outYOff
+		outYOff = 0
+	}
+	if outXOff+outW > tileSize {
+		outW = tileSize - outXOff
+	}
+	if outYOff+outH > tileSize {
+		outH = tileSize - outYOff
+	}
+
+	if outW <= 0 || outH <= 0 {
 		return buf, nil, nil
 	}
 
@@ -222,9 +259,20 @@ func readTile(url string, z, x, y, tileSize int) ([]float32, *float64, error) {
 		return nil, nil, fmt.Errorf("no band 1 in %s", url)
 	}
 
-	err = band.ReadWindowInto(buf, srcXOff, srcYOff, srcW, srcH, tileSize, tileSize)
+	// Read the valid source region, resampled to outW×outH
+	tempBuf := make([]float32, outW*outH)
+	err = band.ReadWindowInto(tempBuf,
+		int(validXOff), int(validYOff), int(validW), int(validH),
+		outW, outH)
 	if err != nil {
 		return nil, nil, fmt.Errorf("GDAL band IO error: %v", err)
+	}
+
+	// Copy tempBuf into the correct position within the full tileSize buffer
+	for row := 0; row < outH; row++ {
+		srcStart := row * outW
+		dstStart := (outYOff+row)*tileSize + outXOff
+		copy(buf[dstStart:dstStart+outW], tempBuf[srcStart:srcStart+outW])
 	}
 
 	// Get nodata
