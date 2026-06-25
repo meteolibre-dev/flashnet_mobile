@@ -221,9 +221,16 @@ func renderGenericTile(data []float32, rgba []byte, nodataMask []bool, cfg *Band
 // PNG encoding
 // ---------------------------------------------------------------------------
 
-// encodePNG encodes a raw RGBA byte slice into PNG bytes.
+// encodePNG encodes a raw straight-alpha RGBA byte slice into PNG bytes.
+//
+// IMPORTANT: uses image.NRGBA (non-premultiplied alpha), NOT image.RGBA.
+// image.RGBA stores alpha-premultiplied pixels, so if we wrote straight-alpha
+// values into it, the PNG encoder would "un-premultiply" them (dividing R,G,B
+// by A/255), corrupting all semi-transparent pixels — e.g. yellow (255,255,0)
+// with alpha=210 would become (54,243,0) = green. NRGBA stores straight
+// alpha and the PNG encoder writes it correctly.
 func encodePNG(rgba []byte, width, height int) ([]byte, error) {
-	img := image.NewRGBA(image.Rect(0, 0, width, height))
+	img := image.NewNRGBA(image.Rect(0, 0, width, height))
 	copy(img.Pix, rgba)
 
 	var buf bytes.Buffer
