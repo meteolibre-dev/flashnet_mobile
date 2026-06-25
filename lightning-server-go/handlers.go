@@ -644,10 +644,10 @@ func generatePreviewRGBA(data []float32, band string, nodata *float64, width, he
 		}
 
 		if band == "lightning" {
-			var c [4]byte = [4]byte{255, 255, 0, 150}
-			for val, lc := range LightningCmap {
-				if val > 0 && float64(v) >= float64(val) {
-					c = lc
+			c := LightningDefaultColor
+			for _, e := range LightningColorEntries {
+				if e.Val > 0 && float64(v) >= float64(e.Val) {
+					c = e.Color
 				}
 			}
 			rgba[off], rgba[off+1], rgba[off+2], rgba[off+3] = c[0], c[1], c[2], c[3]

@@ -69,14 +69,25 @@ var BANDS = map[string]*BandConfig{
 	},
 }
 
-// Lightning colormap: value → RGBA
-var LightningCmap = map[int][4]byte{
-	0: {255, 255, 0, 150}, // Yellow
-	1: {255, 255, 0, 180}, // Yellow
-	2: {255, 200, 0, 210}, // Orange-yellow
-	3: {255, 100, 0, 230}, // Orange
-	4: {255, 0, 0, 255},   // Red
+// LightningColorEntries is the lightning colormap as an ORDERED slice.
+// Must be a slice (not a map) so iteration is deterministic — Go maps
+// iterate in random order, which would let a lower-valued entry overwrite
+// a higher one and produce wrong colors (e.g. green from alpha-blending).
+// Entries are sorted ascending; the highest matching entry wins.
+var LightningColorEntries = []struct {
+	Val   int
+	Color [4]byte
+}{
+	{0, [4]byte{255, 255, 0, 150}}, // Yellow (default for non-zero)
+	{1, [4]byte{255, 255, 0, 180}}, // Yellow
+	{2, [4]byte{255, 200, 0, 210}}, // Orange-yellow
+	{3, [4]byte{255, 100, 0, 230}}, // Orange
+	{4, [4]byte{255, 0, 0, 255}},   // Red
 }
+
+// LightningDefaultColor is the fallback for non-zero pixels that don't
+// match any threshold (shouldn't normally happen).
+var LightningDefaultColor = [4]byte{255, 255, 0, 150}
 
 // Environment-driven configuration
 var (

@@ -110,19 +110,22 @@ func renderLightningTile(data []float32, rgba []byte, nodataMask []bool, cfg *Ba
 			rgba[off], rgba[off+1], rgba[off+2], rgba[off+3] = 0, 0, 0, 0
 			continue
 		}
-		// Normalize to 0-255
-		normalized := (float64(v) - cfg.Min) / (cfg.Max - cfg.Min) * 255
-		if normalized > 255 {
-			normalized = 255
-		}
 
-		// Find the highest matching color
-		var color [4]byte = [4]byte{255, 255, 0, 150} // default for non-zero
-		for val, c := range LightningCmap {
-			if val > 0 && normalized >= float64(val)*255/cfg.Max {
-				color = c
+		// Start with the default non-zero color
+		color := LightningDefaultColor
+
+		// Iterate in ascending order; the highest matching entry wins
+		// (same semantics as the Python ordered-dict loop).
+		for _, e := range LightningColorEntries {
+			if e.Val > 0 {
+				threshold := float64(e.Val) * 255.0 / cfg.Max
+				normalized := (float64(v) - cfg.Min) / (cfg.Max - cfg.Min) * 255.0
+				if normalized >= threshold {
+					color = e.Color
+				}
 			}
 		}
+
 		rgba[off] = color[0]
 		rgba[off+1] = color[1]
 		rgba[off+2] = color[2]
