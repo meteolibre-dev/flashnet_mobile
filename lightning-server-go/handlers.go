@@ -638,16 +638,33 @@ func generatePreviewRGBA(data []float32, band string, nodata *float64, width, he
 
 	for i, v := range data {
 		off := i * 4
-		if nodataMask[i] || v == 0 {
+		if nodataMask[i] {
 			rgba[off], rgba[off+1], rgba[off+2], rgba[off+3] = 0, 0, 0, 0
 			continue
 		}
 
 		if band == "lightning" {
+			// Convert to uint8 first — truncates tiny interpolated values to 0
+			clipped := v
+			if clipped < float32(cfg.Min) {
+				clipped = float32(cfg.Min)
+			}
+			if clipped > float32(cfg.Max) {
+				clipped = float32(cfg.Max)
+			}
+			normalized := uint8((float64(clipped) - cfg.Min) / (cfg.Max - cfg.Min) * 255.0)
+			if normalized == 0 {
+				rgba[off], rgba[off+1], rgba[off+2], rgba[off+3] = 0, 0, 0, 0
+				continue
+			}
+
 			c := LightningDefaultColor
 			for _, e := range LightningColorEntries {
-				if e.Val > 0 && float64(v) >= float64(e.Val) {
-					c = e.Color
+				if e.Val > 0 {
+					threshold := int(float64(e.Val) * 255.0 / cfg.Max)
+					if int(normalized) >= threshold {
+						c = e.Color
+					}
 				}
 			}
 			rgba[off], rgba[off+1], rgba[off+2], rgba[off+3] = c[0], c[1], c[2], c[3]

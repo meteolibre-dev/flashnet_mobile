@@ -103,10 +103,36 @@ func renderRadarTile(data []float32, rgba []byte, nodataMask []bool, tileSize in
 }
 
 // renderLightningTile applies the discrete lightning colormap.
+// IMPORTANT: data values must be converted to uint8 (0-255) BEFORE the > 0 check,
+// matching the Python server. This ensures that tiny interpolated values
+// (e.g. 0.001 from GDAL resampling) are truncated to 0 and rendered transparent.
+// Without this, those edge pixels get semi-transparent yellow (alpha=150)
+// which blends with the map background to produce an unwanted green tint.
 func renderLightningTile(data []float32, rgba []byte, nodataMask []bool, cfg *BandConfig, tileSize int) {
+	rangeVal := cfg.Max - cfg.Min
+	if rangeVal == 0 {
+		rangeVal = 1
+	}
+
 	for i, v := range data {
 		off := i * 4
-		if nodataMask[i] || v <= 0 {
+		if nodataMask[i] {
+			rgba[off], rgba[off+1], rgba[off+2], rgba[off+3] = 0, 0, 0, 0
+			continue
+		}
+
+		// Convert to uint8 first — this truncates tiny values to 0,
+		// exactly like Python's .astype(np.uint8)
+		clipped := v
+		if clipped < float32(cfg.Min) {
+			clipped = float32(cfg.Min)
+		}
+		if clipped > float32(cfg.Max) {
+			clipped = float32(cfg.Max)
+		}
+		normalized := uint8((float64(clipped) - cfg.Min) / rangeVal * 255.0)
+
+		if normalized == 0 {
 			rgba[off], rgba[off+1], rgba[off+2], rgba[off+3] = 0, 0, 0, 0
 			continue
 		}
@@ -115,12 +141,10 @@ func renderLightningTile(data []float32, rgba []byte, nodataMask []bool, cfg *Ba
 		color := LightningDefaultColor
 
 		// Iterate in ascending order; the highest matching entry wins
-		// (same semantics as the Python ordered-dict loop).
 		for _, e := range LightningColorEntries {
 			if e.Val > 0 {
-				threshold := float64(e.Val) * 255.0 / cfg.Max
-				normalized := (float64(v) - cfg.Min) / (cfg.Max - cfg.Min) * 255.0
-				if normalized >= threshold {
+				threshold := int(float64(e.Val) * 255.0 / cfg.Max)
+				if int(normalized) >= threshold {
 					color = e.Color
 				}
 			}
@@ -164,22 +188,28 @@ func renderGenericTile(data []float32, rgba []byte, nodataMask []bool, cfg *Band
 
 	for i, v := range data {
 		off := i * 4
-		if nodataMask[i] || v == 0 {
+		if nodataMask[i] {
 			rgba[off], rgba[off+1], rgba[off+2], rgba[off+3] = 0, 0, 0, 0
 			continue
 		}
-		normalized := (float64(v) - cfg.Min) / range_
-		if normalized < 0 {
-			normalized = 0
+
+		// Convert to uint8 first (matches Python's .astype(np.uint8)).
+		// Tiny interpolated values truncate to 0 → transparent.
+		clipped := v
+		if clipped < float32(cfg.Min) {
+			clipped = float32(cfg.Min)
 		}
-		if normalized > 1 {
-			normalized = 1
+		if clipped > float32(cfg.Max) {
+			clipped = float32(cfg.Max)
 		}
-		idx := int(normalized * 255)
-		if idx > 255 {
-			idx = 255
+		normalized := uint8((float64(clipped) - cfg.Min) / range_ * 255.0)
+
+		if normalized == 0 {
+			rgba[off], rgba[off+1], rgba[off+2], rgba[off+3] = 0, 0, 0, 0
+			continue
 		}
-		c := (*lut)[idx]
+
+		c := (*lut)[normalized]
 		rgba[off] = c[0]
 		rgba[off+1] = c[1]
 		rgba[off+2] = c[2]
