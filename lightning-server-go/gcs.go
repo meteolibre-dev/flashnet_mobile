@@ -238,8 +238,11 @@ func handleAvailable(ctx context.Context, days int, band string) (*AvailableResp
 		dateFolder := d.Format("2006-01-02")
 		datePrefix := fmt.Sprintf("forecasts/%s/", dateFolder)
 
-		// Use delimiter to list subfolders
-		resp, err := svc.Objects.List(bucket).Prefix(datePrefix).Delimiter("/").MaxResults(1).Context(ctx).Do()
+		// Use delimiter to list ALL subfolders (runs) for this date.
+		// No MaxResults limit here — we need every run subfolder so we can
+		// pick the globally-latest one. (MaxResults(1) is only safe for
+		// /history/dates where we just check existence.)
+		resp, err := svc.Objects.List(bucket).Prefix(datePrefix).Delimiter("/").MaxResults(1000).Context(ctx).Do()
 		if err != nil {
 			log.Printf("Warning: GCS list error for %s: %v", datePrefix, err)
 			continue
