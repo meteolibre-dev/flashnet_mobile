@@ -27,7 +27,6 @@ Future<({List<Timestep> timesteps, List<String> availableBands})>
     final minute = int.parse(ft.substring(10, 12));
 
     return Timestep(
-      dateFolder: ts['date_folder'] as String,
       filenameTime: ft,
       fullDate: DateTime.utc(year, month, day, hour, minute),
       availableBands: List<String>.from(ts['available_bands'] ?? []),
