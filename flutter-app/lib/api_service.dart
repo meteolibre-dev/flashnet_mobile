@@ -3,10 +3,7 @@ import 'package:http/http.dart' as http;
 import 'models.dart';
 
 const _serverUrl =
-    'https://lightning-server-v2-935480850831.europe-west3.run.app';
-
-const _baseBucketUrl =
-    'https://storage.googleapis.com/inference_result/forecasts';
+    'https://tiles.meteolibre.dev';
 
 Future<({List<Timestep> timesteps, List<String> availableBands})>
     fetchAvailableTimesteps({int maxTimesteps = 18}) async {
@@ -47,7 +44,7 @@ Future<({List<Timestep> timesteps, List<String> availableBands})>
 }
 
 String tileUrl(Timestep step, String channelId) {
-  final base = '$_serverUrl/tiles/{z}/{x}/{y}.png?band=$channelId&time=${step.filenameTime}';
+  final base = 'https://tiles.meteolibre.dev/tiles/{z}/{x}/{y}.png?band=$channelId&time=${step.filenameTime}';
   if (step.runTime != null) {
     return '$base&run_time=${step.runTime}';
   }
@@ -56,6 +53,3 @@ String tileUrl(Timestep step, String channelId) {
 
 String boundsUrl(Timestep step, String channelId) =>
     '$_serverUrl/bounds?band=$channelId&time=${step.filenameTime}';
-
-String tiffUrl(Timestep step, String channelId) =>
-    '$_baseBucketUrl/${step.dateFolder}/forecast_${step.filenameTime}_$channelId.tiff';

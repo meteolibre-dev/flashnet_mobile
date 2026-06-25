@@ -2,7 +2,7 @@ name: flashnet
 description: "FlashNet - Lightning & Weather Forecast App"
 publish_to: 'none'
 
-version: 1.0.1+128
+version: 1.2.1+132
 
 environment:
   sdk: ^3.8.0
