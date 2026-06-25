@@ -1,0 +1,11 @@
+# Binary (built locally, don't include in Docker build context)
+lightning-server-go
+
+# Local environment
+.env
+*.local
+
+# IDE / OS files
+.vscode/
+.idea/
+.DS_Store
