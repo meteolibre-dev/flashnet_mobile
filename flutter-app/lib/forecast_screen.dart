@@ -902,24 +902,93 @@ class _ForecastScreenState extends State<ForecastScreen> {
 
   Widget _buildInlineLegend() {
     final isRain = _selectedChannel.id == 'radar';
-    final gradientColors = isRain
-        ? const [
-            Color(0x0004E200), // transparent green (light)
-            Color(0xFF01A501), // green
-            Color(0xFFFFF700), // yellow
-            Color(0xFFFF9000), // orange
-            Color(0xFFFF0000), // red
-            Color(0xFFD70000), // dark red (heavy)
-          ]
-        : const [
-            Color(0x00FFFF00), // transparent yellow (low)
-            Color(0xFFFFFF00), // yellow
-            Color(0xFFFFA500), // orange
-            Color(0xFFFF4500), // orange-red
-            Color(0xFFFF0000), // red
-            Color(0xFF8B0000), // dark red (high)
-          ];
-    final label = isRain ? 'Rain' : 'Thunder';
+
+    if (isRain) {
+      return _buildRadarLegend();
+    }
+
+    // Lightning legend (unchanged)
+    return RotatedBox(
+      quarterTurns: 3,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.8),
+          borderRadius: const BorderRadius.only(
+            bottomLeft: Radius.circular(6),
+            bottomRight: Radius.circular(6),
+          ),
+          border: Border.all(color: Colors.white.withValues(alpha: 0.15)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('Thunder',
+                style: TextStyle(
+                    color: Colors.white, fontSize: 9, fontWeight: FontWeight.w600)),
+            const SizedBox(width: 6),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(2),
+              child: Container(
+                width: 120,
+                height: 12,
+                decoration: const BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.centerLeft,
+                    end: Alignment.centerRight,
+                    colors: [
+                      Color(0x00FFFF00),
+                      Color(0xFFFFFF00),
+                      Color(0xFFFFA500),
+                      Color(0xFFFF4500),
+                      Color(0xFFFF0000),
+                      Color(0xFF8B0000),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 6),
+            const Text('Low',
+                style: TextStyle(color: Colors.white54, fontSize: 8)),
+            const Text(' → ',
+                style: TextStyle(color: Colors.white38, fontSize: 8)),
+            const Text('High',
+                style: TextStyle(color: Colors.white70, fontSize: 8)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Radar legend matching palette_radar_35.py discrete classes.
+  /// Key stops: cyan → blue → green → yellow → orange → red → dark red → pink
+  Widget _buildRadarLegend() {
+    // Representative stops from the 34-class palette_radar_35:
+    //   0.02 → #9BBEC4 (cyan)   0.23 → #1275E6 (blue)   0.4 → #02FE01 (green)
+    //   1.2  → #01C001 (green)  4.4  → #F8EF01 (yellow)  8.5 → #EAB400 (amber)
+    //   10.0 → #F19402 (orange) 18.0 → #FC5001 (red-org) 22.3 → #FC2902 (red)
+    //   39.2 → #EE0100 (red)    63.6 → #C40000 (dk red) 102.5 → #FBC9FC (pink)
+    //   268.8 → #972D98 (purple) 341.9 → #FFB9FF (lt pink)
+    const stops = [
+      Color(0xFF9BBEC4), // 0.02 mm/h  – light cyan
+      Color(0xFF62EBFD), // 0.09
+      Color(0xFF0826E1), // 0.32       – deep blue
+      Color(0xFF02FE01), // 0.4        – bright green
+      Color(0xFF01C001), // 1.2        – green
+      Color(0xFF01A000), // 2.8        – dark green
+      Color(0xFFF8EF01), // 4.4        – yellow
+      Color(0xFFEAB400), // 8.5        – amber
+      Color(0xFFF19402), // 10.0       – orange
+      Color(0xFFFC5001), // 18.0       – red-orange
+      Color(0xFFFC2902), // 22.3       – red
+      Color(0xFFEE0100), // 39.2       – bright red
+      Color(0xFFC40000), // 63.6       – dark red
+      Color(0xFFAC0000), // 80.7       – darker red
+      Color(0xFFFBC9FC), // 102.5      – pink
+      Color(0xFFB257B4), // 211.4      – purple
+      Color(0xFFFFB9FF), // 341.9+     – light pink
+    ];
 
     return RotatedBox(
       quarterTurns: 3,
@@ -936,33 +1005,30 @@ class _ForecastScreenState extends State<ForecastScreen> {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(
-              label,
-              style: const TextStyle(
-                  color: Colors.white, fontSize: 9, fontWeight: FontWeight.w600),
-            ),
+            const Text('mm/h',
+                style: TextStyle(
+                    color: Colors.white, fontSize: 9, fontWeight: FontWeight.w600)),
             const SizedBox(width: 6),
-            // Horizontal gradient bar (will be rotated vertical)
             ClipRRect(
               borderRadius: BorderRadius.circular(2),
               child: Container(
-                width: 120,
+                width: 140,
                 height: 12,
                 decoration: BoxDecoration(
                   gradient: LinearGradient(
                     begin: Alignment.centerLeft,
                     end: Alignment.centerRight,
-                    colors: gradientColors,
+                    colors: stops,
                   ),
                 ),
               ),
             ),
             const SizedBox(width: 6),
-            const Text('Low',
+            const Text('0',
                 style: TextStyle(color: Colors.white54, fontSize: 8)),
             const Text(' → ',
                 style: TextStyle(color: Colors.white38, fontSize: 8)),
-            const Text('High',
+            const Text('342',
                 style: TextStyle(color: Colors.white70, fontSize: 8)),
           ],
         ),
