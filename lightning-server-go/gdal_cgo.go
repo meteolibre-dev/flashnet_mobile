@@ -75,18 +75,33 @@ import "C"
 import (
 	"errors"
 	"runtime"
+	"sync"
 	"unsafe"
 )
 
 // GdalDataset wraps a GDALDatasetH handle.
+//
+// GDAL/libtiff is NOT thread-safe: concurrent GDALRasterIO calls on the
+// same dataset corrupt libtiff's internal buffer (TIFF_MYBUFFER) and crash
+// with SIGABRT. The mu mutex serializes all IO on this dataset. Different
+// datasets can still be read concurrently (different mutexes).
 type GdalDataset struct {
 	handle C.GDALDatasetH
+	mu     sync.Mutex
 }
 
-// GdalBand wraps a GDALRasterBandH handle.
+// GdalBand wraps a GDALRasterBandH handle and a back-pointer to its parent
+// dataset so IO calls can acquire the dataset lock.
 type GdalBand struct {
 	handle C.GDALRasterBandH
+	ds     *GdalDataset
 }
+
+// gdalGlobalMu protects GDALOpen and GDALClose. The /vsigs/ virtual
+// filesystem and CPL error handling share global state that is not safe
+// for concurrent access during open/close. Reads on already-open datasets
+// use the per-dataset mutex instead (allowing concurrency across files).
+var gdalGlobalMu sync.Mutex
 
 // gdalInited ensures GDALAllRegister and error handler are installed once.
 var gdalInited = false
@@ -101,16 +116,21 @@ func gdalInit() {
 }
 
 // gdalOpen opens a dataset from a URL/path (e.g. /vsigs/bucket/file.tif).
-// The caller must call Close() when done (or rely on finalizer).
+// Thread-safe: serialized via gdalGlobalMu because /vsigs/ and CPL are
+// not safe for concurrent opens.
 func gdalOpen(url string) (*GdalDataset, error) {
 	gdalInit()
+
+	gdalGlobalMu.Lock()
+	defer gdalGlobalMu.Unlock()
+
 	cURL := C.CString(url)
 	defer C.free(unsafe.Pointer(cURL))
 
-	// Lock OS thread so CPL error handling is consistent
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
+	C.getLastError() // clear stale error
 	ds := C.goGDALOpen(cURL)
 	if ds == nil {
 		errMsg := C.getLastError()
@@ -122,8 +142,11 @@ func gdalOpen(url string) (*GdalDataset, error) {
 	return &GdalDataset{handle: ds}, nil
 }
 
-// Close releases the dataset.
+// Close releases the dataset. Thread-safe via gdalGlobalMu.
 func (ds *GdalDataset) Close() {
+	gdalGlobalMu.Lock()
+	defer gdalGlobalMu.Unlock()
+
 	if ds.handle != nil {
 		C.GDALClose(ds.handle)
 		ds.handle = nil
@@ -164,7 +187,7 @@ func (ds *GdalDataset) Band(index int) *GdalBand {
 	if h == nil {
 		return nil
 	}
-	return &GdalBand{handle: h}
+	return &GdalBand{handle: h, ds: ds}
 }
 
 // NodataValue returns the nodata value and whether one is set.
@@ -211,10 +234,15 @@ func (b *GdalBand) ReadWindow(srcXOff, srcYOff, srcW, srcH, outW, outH int) ([]f
 }
 
 // ReadWindowInto reads a window into the provided buffer.
+// Thread-safe: acquires the dataset mutex so concurrent goroutines
+// don't corrupt libtiff's internal state.
 func (b *GdalBand) ReadWindowInto(buf []float32, srcXOff, srcYOff, srcW, srcH, outW, outH int) error {
 	if len(buf) < outW*outH {
 		return errors.New("buffer too small")
 	}
+
+	b.ds.mu.Lock()
+	defer b.ds.mu.Unlock()
 
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
@@ -224,7 +252,7 @@ func (b *GdalBand) ReadWindowInto(buf []float32, srcXOff, srcYOff, srcW, srcH, o
 
 	rc := C.goGDALRasterIO(b.handle,
 		C.int(srcXOff), C.int(srcYOff), C.int(srcW), C.int(srcH),
-	 (*C.float)(unsafe.Pointer(&buf[0])),
+		(*C.float)(unsafe.Pointer(&buf[0])),
 		C.int(outW), C.int(outH))
 
 	if rc != 0 {
