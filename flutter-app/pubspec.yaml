@@ -2,7 +2,7 @@ name: flashnet
 description: "FlashNet - Lightning & Weather Forecast App"
 publish_to: 'none'
 
-version: 1.0.1+128
+version: 1.0.1+132
 
 environment:
   sdk: ^3.8.0
@@ -32,6 +32,7 @@ flutter_launcher_icons:
 
 flutter_native_splash:
   color: "#000000"
+  image: "assets/splash.png"
   fullscreen: true
   android: true
   ios: true
