@@ -10,7 +10,7 @@ services:
       - BUCKET_BASE_URL=gs://inference_result_flashedges_forecast/forecasts
       - GOMAXPROCS=4
       - GDAL_CACHEMAX=500
-      # Optional band range overrides (defaults: VIS 0–250, IR -35–250):
+      # Optional band range overrides (defaults: IR/sat_ch0 0–250, VIS/sat_ch1 -35–250):
       # - BAND_SAT_CH0_MIN=0
       # - BAND_SAT_CH0_MAX=250
       # - BAND_SAT_CH1_MIN=-35

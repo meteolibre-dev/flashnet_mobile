@@ -11,14 +11,14 @@ based on [lightning-server-go](../lightning-server-go) (which serves the local
 | **Model** | Local 1 km / 10 min | Global 0.1° / 1 h |
 | **Bucket** | `gs://inference_result_meteolibre_forecast` | `gs://inference_result_flashedges_forecast` |
 | **Layout** | `forecasts/YYYY-MM-DD/{run}/forecast_{ts}_{band}.tiff` | `forecasts/YYYYMMDD/YYYYMMDD_HHMM/forecast_{ts}_{band}.tif` |
-| **Bands** | lightning, radar, sat_ch0–2 (one band per file) | `sat_ch0` (VIS) + `sat_ch1` (IR) — **both raster bands in one `forecast_{ts}_sat.tif`** |
+| **Bands** | lightning, radar, sat_ch0–2 (one band per file) | `sat_ch0` (IR) + `sat_ch1` (VIS) — **both raster bands in one `forecast_{ts}_sat.tif`** |
 | **Bounds** | Europe (-10, 33, 33, 65) | Global (-180, -90, 180, 90) |
 | **Raster size** | ~4000×4000 | 3600×1800 |
 
 The `metar` files in the bucket are **not served yet** — only the `sat` COGs.
 
 Because both channels live in the same GeoTIFF, every COG read takes a
-1-based `bandIndex` parameter (VIS = 1, IR = 2) — this is the main code
+1-based `bandIndex` parameter (IR = 1, VIS = 2) — this is the main code
 change vs the lightning server.
 
 ## Anonymous fallback

@@ -15,7 +15,7 @@ import (
 // BandConfig describes how to render a single forecast band/channel.
 //
 // The global model stores multiple raster bands inside a single file
-// (forecast_{ts}_sat.tif holds VIS in raster band 1 and IR in raster band 2),
+// (forecast_{ts}_sat.tif holds IR in raster band 1 and VIS in raster band 2),
 // so each logical band maps to a file band suffix + a 1-based raster index.
 type BandConfig struct {
 	Name     string  `json:"name"`
@@ -45,25 +45,25 @@ var Region = struct {
 var defaultBounds = [4]float64{-180.0, -90.0, 180.0, 90.0}
 
 // BANDS maps logical band name → config. Both channels are served from the
-// same forecast_{ts}_sat.tif COG: raster band 1 = VIS, raster band 2 = IR.
-// Observed value ranges (global 0.1° model): VIS ≈ 0…250, IR ≈ -32…250.
+// same forecast_{ts}_sat.tif COG: raster band 1 = IR (sat_ch0), raster band 2 = VIS (sat_ch1).
+// Observed value ranges (global 0.1° model): band 1 ≈ 0…250, band 2 ≈ -32…250.
 var BANDS = map[string]*BandConfig{
 	"sat_ch0": {
-		Name:      "Satellite Channel 0 (VIS)",
+		Name:      "Satellite Channel 0 (IR)",
 		Min:       0,
 		Max:       250,
-		Colormap:  "viridis",
-		Invert:    false,
+		Colormap:  "plasma",
+		Invert:    true, // Inverted colormap (cold = bright)
 		DType:     "float32",
 		FileBand:  "sat",
 		BandIndex: 1,
 	},
 	"sat_ch1": {
-		Name:      "Satellite Channel 1 (IR)",
+		Name:      "Satellite Channel 1 (VIS)",
 		Min:       -35,
 		Max:       250,
-		Colormap:  "plasma",
-		Invert:    true, // Inverted for IR (cold = bright)
+		Colormap:  "viridis",
+		Invert:    false,
 		DType:     "float32",
 		FileBand:  "sat",
 		BandIndex: 2,
