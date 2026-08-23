@@ -53,7 +53,7 @@ var BANDS = map[string]*BandConfig{
 		Min:       0,
 		Max:       250,
 		Colormap:  "plasma",
-		Invert:    true, // Inverted colormap (cold = bright)
+		Invert:    false,
 		DType:     "float32",
 		FileBand:  "sat",
 		BandIndex: 1,
