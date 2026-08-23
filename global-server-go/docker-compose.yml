@@ -1,0 +1,23 @@
+version: "3.8"
+
+services:
+  global-server-go:
+    build: .
+    ports:
+      - "3002:8080"
+    environment:
+      - PORT=8080
+      - BUCKET_BASE_URL=gs://inference_result_flashedges_forecast/forecasts
+      - GOMAXPROCS=4
+      - GDAL_CACHEMAX=500
+      # Optional band range overrides (defaults: VIS 0–250, IR -35–250):
+      # - BAND_SAT_CH0_MIN=0
+      # - BAND_SAT_CH0_MAX=250
+      # - BAND_SAT_CH1_MIN=-35
+      # - BAND_SAT_CH1_MAX=250
+      # For GCS auth, set one of:
+      # - GCP_CREDENTIALS_B64=<base64-encoded service account JSON>
+      # - GCP_CREDENTIALS=<raw service account JSON>
+      # - GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json
+      # Or run on GCP with Workload Identity (metadata server auto-detected)
+    restart: unless-stopped

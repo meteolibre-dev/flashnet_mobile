@@ -1,0 +1,10 @@
+global-server-go
+
+# Local environment
+.env
+*.local
+
+# IDE / OS files
+.vscode/
+.idea/
+.DS_Store
