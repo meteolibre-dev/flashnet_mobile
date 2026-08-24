@@ -11,11 +11,14 @@ based on [lightning-server-go](../lightning-server-go) (which serves the local
 | **Model** | Local 1 km / 10 min | Global 0.1° / 1 h |
 | **Bucket** | `gs://inference_result_meteolibre_forecast` | `gs://inference_result_flashedges_forecast` |
 | **Layout** | `forecasts/YYYY-MM-DD/{run}/forecast_{ts}_{band}.tiff` | `forecasts/YYYYMMDD/YYYYMMDD_HHMM/forecast_{ts}_{band}.tif` |
-| **Bands** | lightning, radar, sat_ch0–2 (one band per file) | `sat_ch0` (IR) + `sat_ch1` (VIS) — **both raster bands in one `forecast_{ts}_sat.tif`** |
+| **Bands** | lightning, radar, sat_ch0–2 (one band per file) | `sat_ch0` (IR) + `sat_ch1` (VIS) in `forecast_{ts}_sat.tif`; 7 `metar_*` bands (tmpc, dwpc, mslp, cloud_cover, p01m, wind_u, wind_v) in `forecast_{ts}_metar.tif` |
 | **Bounds** | Europe (-10, 33, 33, 65) | Global (-180, -90, 180, 90) |
 | **Raster size** | ~4000×4000 | 3600×1800 |
 
-The `metar` files in the bucket are **not served yet** — only the `sat` COGs.
+The `metar` COGs are served since v1.1: logical bands `metar_tmpc`,
+`metar_dwpc`, `metar_mslp`, `metar_cloud_cover`, `metar_p01m`,
+`metar_wind_u`, `metar_wind_v` (raster bands 1-7, same order as the dataset
+generator's `METAR_FEATURES`).
 
 Because both channels live in the same GeoTIFF, every COG read takes a
 1-based `bandIndex` parameter (IR = 1, VIS = 2) — this is the main code
@@ -69,6 +72,7 @@ Same surface as lightning-server-go:
 | `GET /bands` | Band configs (incl. raster band index) |
 | `GET /times` | Generated hourly timestamps |
 | `GET /available` | Latest run + its timesteps |
+| `GET /airports` | Static list of METAR airports (icao/lat/lon/name, gzip+ETag) |
 | `GET /history/dates` | Dates with data |
 | `GET /history/dates/{YYYY-MM-DD}` | Runs valid on a date |
 | `GET /tiles/{z}/{x}/{y}.png` | XYZ tile (PNG) |
@@ -87,7 +91,14 @@ GET /available?days=7
 
 GET /tiles/3/4/3.png?band=sat_ch1&time=202608231500&run_time=20260823_1500
 GET /point?lat=48.85&lon=2.35&band=sat_ch0
+GET /point?lat=48.86&lon=2.35&band=metar_tmpc,metar_dwpc&steps=all&run_time=20260823_1500
 ```
+
+### METAR airports
+
+`data/airports.json` is embedded at build time (regenerate with
+`python3 scripts/fetch_airports.py`) and served at `/airports` with
+gzip + ETag and a 24h cache.
 
 ## Deployment
 

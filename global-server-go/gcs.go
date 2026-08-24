@@ -470,6 +470,58 @@ func handleHistoryDates(ctx context.Context, days int) (*HistoryDatesResponse, e
 	}, nil
 }
 
+// listRunTimestamps lists the (deduplicated) forecast timesteps of one run
+// folder (run_time = "YYYYMMDD_HHMM"). Used by /point when the client pins a
+// specific run. Returns an error only when the bucket listing fails; a run
+// with no matching files yields an empty slice.
+func listRunTimestamps(ctx context.Context, runTime string) ([]TimestampInfo, error) {
+	bucket := getBucketName()
+	svc := getGCSService()
+
+	runDate := extractRunDate(runTime)
+	runPrefix := fmt.Sprintf("forecasts/%s/%s/", runDate, runTime)
+
+	resp, err := svc.Objects.List(bucket).Prefix(runPrefix).MaxResults(1000).Context(ctx).Do()
+	if err != nil {
+		return nil, fmt.Errorf("error listing run %s: %v", runTime, err)
+	}
+
+	tsBands := make(map[string]map[string]bool)
+	for _, obj := range resp.Items {
+		m := forecastFileRe.FindStringSubmatch(obj.Name)
+		if m == nil {
+			continue
+		}
+		ts, foundBand := m[1], m[2]
+		tsToH5Subfolder.Store(ts, runTime)
+		if tsBands[ts] == nil {
+			tsBands[ts] = make(map[string]bool)
+		}
+		tsBands[ts][foundBand] = true
+	}
+
+	var tsList []string
+	for ts := range tsBands {
+		tsList = append(tsList, ts)
+	}
+	sort.Strings(tsList)
+
+	var result []TimestampInfo
+	for _, ts := range tsList {
+		dt, err := parseTimestamp(ts)
+		if err != nil {
+			continue
+		}
+		result = append(result, TimestampInfo{
+			Timestamp:      ts,
+			Datetime:       dt.Format("2006-01-02T15:04:05Z"),
+			AvailableBands: logicalBandsFor(tsBands[ts]),
+			RunTime:        runTime,
+		})
+	}
+	return result, nil
+}
+
 // ---------------------------------------------------------------------------
 // /history/dates/{date} — get runs for a specific date
 // ---------------------------------------------------------------------------

@@ -44,9 +44,18 @@ var Region = struct {
 // Default bounds for the globe [west, south, east, north]
 var defaultBounds = [4]float64{-180.0, -90.0, 180.0, 90.0}
 
-// BANDS maps logical band name → config. Both channels are served from the
-// same forecast_{ts}_sat.tif COG: raster band 1 = IR (sat_ch0), raster band 2 = VIS (sat_ch1).
+// BANDS maps logical band name → config.
+//
+// Satellite channels come from the forecast_{ts}_sat.tif COG:
+// raster band 1 = IR (sat_ch0), raster band 2 = VIS (sat_ch1).
 // Observed value ranges (global 0.1° model): band 1 ≈ 0…250, band 2 ≈ -32…250.
+//
+// METAR channels come from the forecast_{ts}_metar.tif COG (7 raster bands,
+// channel order mirrors METAR_FEATURES in the dataset generator):
+//   1=tmpc(°C), 2=dwpc(°C), 3=mslp(hPa), 4=cloud_cover(0..1),
+//   5=p01m(dBZ), 6=wind_u(m/s), 7=wind_v(m/s)
+// Values outside real METAR ranges (e.g. the -10000 NaN sentinel) are simply
+// clamped by the renderers; /point returns them raw.
 var BANDS = map[string]*BandConfig{
 	"sat_ch0": {
 		Name:      "Satellite Channel 0 (IR)",
@@ -67,6 +76,76 @@ var BANDS = map[string]*BandConfig{
 		DType:     "float32",
 		FileBand:  "sat",
 		BandIndex: 2,
+	},
+	"metar_tmpc": {
+		Name:      "METAR Temperature (°C)",
+		Min:       -50,
+		Max:       50,
+		Colormap:  "viridis",
+		Invert:    false,
+		DType:     "float32",
+		FileBand:  "metar",
+		BandIndex: 1,
+	},
+	"metar_dwpc": {
+		Name:      "METAR Dew Point (°C)",
+		Min:       -50,
+		Max:       50,
+		Colormap:  "viridis",
+		Invert:    false,
+		DType:     "float32",
+		FileBand:  "metar",
+		BandIndex: 2,
+	},
+	"metar_mslp": {
+		Name:      "METAR Mean Sea Level Pressure (hPa)",
+		Min:       950,
+		Max:       1050,
+		Colormap:  "viridis",
+		Invert:    false,
+		DType:     "float32",
+		FileBand:  "metar",
+		BandIndex: 3,
+	},
+	"metar_cloud_cover": {
+		Name:      "METAR Cloud Cover (0-1)",
+		Min:       0,
+		Max:       1,
+		Colormap:  "viridis",
+		Invert:    false,
+		DType:     "float32",
+		FileBand:  "metar",
+		BandIndex: 4,
+	},
+	"metar_p01m": {
+		Name:      "METAR Precipitation (dBZ)",
+		Min:       -5,
+		Max:       70,
+		Colormap:  "plasma",
+		Invert:    false,
+		DType:     "float32",
+		FileBand:  "metar",
+		BandIndex: 5,
+	},
+	"metar_wind_u": {
+		Name:      "METAR Wind U Component (m/s)",
+		Min:       -40,
+		Max:       40,
+		Colormap:  "viridis",
+		Invert:    false,
+		DType:     "float32",
+		FileBand:  "metar",
+		BandIndex: 6,
+	},
+	"metar_wind_v": {
+		Name:      "METAR Wind V Component (m/s)",
+		Min:       -40,
+		Max:       40,
+		Colormap:  "viridis",
+		Invert:    false,
+		DType:     "float32",
+		FileBand:  "metar",
+		BandIndex: 7,
 	},
 }
 

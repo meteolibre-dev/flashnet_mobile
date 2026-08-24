@@ -396,3 +396,50 @@ func readPoint(url string, bandIndex int, lat, lon float64) (float64, error) {
 
 	return v, nil
 }
+
+// readPointMulti reads a single pixel across several raster bands of the
+// same dataset in one pass (used by /point when several logical bands share
+// a file, e.g. metar_tmpc + metar_dwpc in forecast_{ts}_metar.tif).
+// Invalid/no-data values are returned as math.NaN(), never as errors.
+func readPointMulti(url string, bandIndices []int, lat, lon float64) ([]float64, error) {
+	ds, err := cogPool.Open(url)
+	if err != nil {
+		return nil, err
+	}
+
+	gt := ds.GeoTransform()
+	col := int((lon - gt[0]) / gt[1])
+	row := int((lat - gt[3]) / gt[5])
+
+	if col < 0 || col >= ds.Width() || row < 0 || row >= ds.Height() {
+		return nil, fmt.Errorf("point out of bounds")
+	}
+
+	vals := make([]float64, len(bandIndices))
+	for i, idx := range bandIndices {
+		if idx < 1 || idx > ds.RasterCount() {
+			vals[i] = math.NaN()
+			continue
+		}
+		band := ds.Band(idx)
+		if band == nil {
+			vals[i] = math.NaN()
+			continue
+		}
+
+		v, err := band.ReadPoint(col, row)
+		if err != nil {
+			vals[i] = math.NaN()
+			continue
+		}
+
+		f := float64(v)
+		nd, hasNd := band.NodataValue()
+		if math.IsNaN(f) || math.IsInf(f, 0) || (hasNd && f == nd) {
+			f = math.NaN()
+		}
+		vals[i] = f
+	}
+
+	return vals, nil
+}
