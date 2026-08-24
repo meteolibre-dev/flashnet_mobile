@@ -60,6 +60,9 @@ Requires Go 1.22+ and `libgdal-dev` (cgo).
 | `BAND_SAT_CH1_MIN/MAX` | `-35` / `250` | IR render range override |
 | `GCS_ANONYMOUS` | — | Force unauthenticated GCS access |
 | `GCP_CREDENTIALS_B64` | — | Base64 service account JSON (Cloud Run) |
+| `AIRPORTS_AWC_URL` | AWC bulk cache URL | Source for the live station list |
+| `AIRPORTS_REFRESH_MINUTES` | `30` | /airports background refresh interval |
+| `AIRPORTS_MAX_REPORT_AGE` | `3h` | Max report age for a station to be listed |
 
 ## API Endpoints
 
@@ -72,7 +75,7 @@ Same surface as lightning-server-go:
 | `GET /bands` | Band configs (incl. raster band index) |
 | `GET /times` | Generated hourly timestamps |
 | `GET /available` | Latest run + its timesteps |
-| `GET /airports` | Static list of METAR airports (icao/lat/lon/name, gzip+ETag) |
+| `GET /airports` | METAR stations with a recent report (live AWC snapshot, gzip+ETag) |
 | `GET /history/dates` | Dates with data |
 | `GET /history/dates/{YYYY-MM-DD}` | Runs valid on a date |
 | `GET /tiles/{z}/{x}/{y}.png` | XYZ tile (PNG) |
@@ -96,9 +99,20 @@ GET /point?lat=48.86&lon=2.35&band=metar_tmpc,metar_dwpc&steps=all&run_time=2026
 
 ### METAR airports
 
-`data/airports.json` is embedded at build time (regenerate with
-`python3 scripts/fetch_airports.py`) and served at `/airports` with
-gzip + ETag and a 24h cache.
+`GET /airports` returns only the stations that **actually reported METAR
+recently** (previous-hour snapshot, ~5k stations) instead of the full AWC
+station registry (~7.7k):
+
+- The server fetches AWC's bulk metar cache (same source as the dataset
+  generator's `fetch_latest_global`) every `AIRPORTS_REFRESH_MINUTES` (30) in
+  the background, keeps METAR/SPECI reports not older than
+  `AIRPORTS_MAX_REPORT_AGE` (3h), and joins station names/countries from the
+  embedded registry `data/airports.json` (regenerate with
+  `python3 scripts/fetch_airports.py`).
+- Responses are pre-rendered per refresh: gzip + per-snapshot ETag + 15 min
+  browser cache. `X-Airports-Live: true|false` tells whether the payload is
+  the live snapshot or the registry fallback (used until the first
+  successful fetch; stale list is kept if AWC is unreachable).
 
 ## Deployment
 
