@@ -28,6 +28,10 @@ type BandConfig struct {
 	FileBand  string `json:"-"` // filename suffix, e.g. "sat" → forecast_{ts}_sat.tif
 	BandIndex int    `json:"-"` // 1-based raster band within the file
 
+	// SplitValue: for two-segment colormaps (ir_enhanced): the data value
+	// where the warm greys segment ends and the cold spectral segment begins.
+	SplitValue float64 `json:"-"`
+
 	colormap *[256][4]byte // pre-computed 256-entry RGBA LUT
 }
 
@@ -49,12 +53,19 @@ var defaultBounds = [4]float64{-180.0, -90.0, 180.0, 90.0}
 // Satellite channels come from the forecast_{ts}_sat.tif COG:
 // raster band 1 = IR (sat_ch0), raster band 2 = VIS (sat_ch1).
 //
-// The GMGSI channels are stored ~like Kelvin in a 0..255 uint8-equivalent
-// range (see the dataset generator): sat_ch0 (LWIR) low value = cold cloud
-// top, high value = warm surface; sat_ch1 (VIS) is reflectance-like: high
-// value = bright cloud. Rendering ranges are chosen accordingly:
-//   - sat_ch0: 180 K (deep convective tops) … 255 K (warm-surface clip),
-//     mapped over the enhanced-IR palette (spectral → greyscale, cold→warm).
+// The GMGSI channels are stored on a dimensionless 0–255 source imagery
+// scale (digital counts / scaled radiance, per NOAA GMGSI docs; the dataset
+// stats agree — lwir mean is 123 ± 43, not Kelvin-like). For LWIR the counts
+// follow the display convention: low value = warm surface, high value =
+// cold/bright cloud top (verified empirically on forecast data: Sahara ≈ 20,
+// Congo ITCZ tops ≈ 220). sat_ch1 (VIS) is reflectance-like: high value =
+// bright cloud. Rendering accordingly:
+//   - sat_ch0: 10 … 230 counts over the enhanced-IR palette, mapped in two
+//     segments like trollimage's `spectral + greys` example: values ≤ Split
+//     (default 150 — light cloud / surface) render on the greyscale ramp,
+//     values > Split (cold cloud tops) on the spectral ramp (black/red at the
+//     coldest). Values < 10 are polar-night/sensor fill → rendered
+//     transparent by the min-clamp.
 //   - sat_ch1: −35 … 250 reflectance counts, greyscale with bright clouds
 //     rendered white (Invert flips the white→black base LUT).
 //
@@ -67,13 +78,14 @@ var defaultBounds = [4]float64{-180.0, -90.0, 180.0, 90.0}
 var BANDS = map[string]*BandConfig{
 	"sat_ch0": {
 		Name:      "Satellite Channel 0 (IR)",
-		Min:       180,
-		Max:       255,
+		Min:       10,
+		Max:       230,
 		Colormap:  "ir_enhanced",
-		Invert:    false,
+		Invert:    false, // LUT is built in data orientation (see palette.go)
 		DType:     "float32",
 		FileBand:  "sat",
 		BandIndex: 1,
+		SplitValue: 150, // greys ≤ 150 counts ≤ spectral (cold tops)
 	},
 	"sat_ch1": {
 		Name:      "Satellite Channel 1 (VIS)",
@@ -196,6 +208,11 @@ func init() {
 		if v := os.Getenv(envPrefix + "_MAX"); v != "" {
 			if f, err := strconv.ParseFloat(v, 64); err == nil {
 				cfg.Max = f
+			}
+		}
+		if v := os.Getenv(envPrefix + "_SPLIT"); v != "" {
+			if f, err := strconv.ParseFloat(v, 64); err == nil {
+				cfg.SplitValue = f
 			}
 		}
 		if v := os.Getenv(envPrefix + "_COLORMAP"); v != "" {
