@@ -21,7 +21,7 @@ type BandConfig struct {
 	Name     string  `json:"name"`
 	Min      float64 `json:"min"`
 	Max      float64 `json:"max"`
-	Colormap string  `json:"colormap"` // "viridis", "plasma"
+	Colormap string  `json:"colormap"` // "viridis", "plasma", "greyscale", "ir_enhanced"
 	Invert   bool    `json:"invert"`
 	DType    string  `json:"dtype"`
 
@@ -48,7 +48,15 @@ var defaultBounds = [4]float64{-180.0, -90.0, 180.0, 90.0}
 //
 // Satellite channels come from the forecast_{ts}_sat.tif COG:
 // raster band 1 = IR (sat_ch0), raster band 2 = VIS (sat_ch1).
-// Observed value ranges (global 0.1° model): band 1 ≈ 0…250, band 2 ≈ -32…250.
+//
+// The GMGSI channels are stored ~like Kelvin in a 0..255 uint8-equivalent
+// range (see the dataset generator): sat_ch0 (LWIR) low value = cold cloud
+// top, high value = warm surface; sat_ch1 (VIS) is reflectance-like: high
+// value = bright cloud. Rendering ranges are chosen accordingly:
+//   - sat_ch0: 180 K (deep convective tops) … 255 K (warm-surface clip),
+//     mapped over the enhanced-IR palette (spectral → greyscale, cold→warm).
+//   - sat_ch1: −35 … 250 reflectance counts, greyscale with bright clouds
+//     rendered white (Invert flips the white→black base LUT).
 //
 // METAR channels come from the forecast_{ts}_metar.tif COG (7 raster bands,
 // channel order mirrors METAR_FEATURES in the dataset generator):
@@ -59,9 +67,9 @@ var defaultBounds = [4]float64{-180.0, -90.0, 180.0, 90.0}
 var BANDS = map[string]*BandConfig{
 	"sat_ch0": {
 		Name:      "Satellite Channel 0 (IR)",
-		Min:       0,
-		Max:       250,
-		Colormap:  "plasma",
+		Min:       180,
+		Max:       255,
+		Colormap:  "ir_enhanced",
 		Invert:    false,
 		DType:     "float32",
 		FileBand:  "sat",
@@ -71,8 +79,8 @@ var BANDS = map[string]*BandConfig{
 		Name:      "Satellite Channel 1 (VIS)",
 		Min:       -35,
 		Max:       250,
-		Colormap:  "viridis",
-		Invert:    false,
+		Colormap:  "greyscale",
+		Invert:    true, // high reflectance (bright clouds) → white
 		DType:     "float32",
 		FileBand:  "sat",
 		BandIndex: 2,
@@ -175,8 +183,9 @@ var (
 )
 
 func init() {
-	// Allow per-band range overrides via env, e.g. SAT_CH0_MIN / SAT_CH0_MAX.
-	// Useful to tune rendering without rebuilding the image.
+	// Allow per-band overrides via env, e.g. SAT_CH0_MIN / SAT_CH0_MAX (also
+	// _COLORMAP / _INVERT). Useful to tune rendering without rebuilding the
+	// image.
 	for name, cfg := range BANDS {
 		envPrefix := "BAND_" + strings.ToUpper(name)
 		if v := os.Getenv(envPrefix + "_MIN"); v != "" {
@@ -188,6 +197,13 @@ func init() {
 			if f, err := strconv.ParseFloat(v, 64); err == nil {
 				cfg.Max = f
 			}
+		}
+		if v := os.Getenv(envPrefix + "_COLORMAP"); v != "" {
+			cfg.Colormap = v
+		}
+		if v := os.Getenv(envPrefix + "_INVERT"); v != "" {
+			b, err := strconv.ParseBool(v)
+			cfg.Invert = err == nil && b
 		}
 	}
 }

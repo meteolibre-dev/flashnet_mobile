@@ -24,6 +24,21 @@ Because both channels live in the same GeoTIFF, every COG read takes a
 1-based `bandIndex` parameter (IR = 1, VIS = 2) — this is the main code
 change vs the lightning server.
 
+## Satellite palettes
+
+The GMGSI channels are stored ~like Kelvin in a 0..255 uint8-equivalent range
+(see the dataset generator): `sat_ch0` (LWIR) is low value = cold cloud top /
+high value = warm surface, `sat_ch1` (VIS) is reflectance-like (high = bright
+cloud). They are rendered with standard satellite palettes:
+
+- **`sat_ch0` (IR)** — enhanced IR (`ir_enhanced`, cf. trollimage's
+  ["spectral + greys" example](https://trollimage.readthedocs.io/en/latest/colormap.html)):
+  saturated spectral ramp on cold cloud tops (180 K → ~228 K), greyscale ramp
+  on warmer surfaces (~228 K → 255 K), black at both extremes. The LUT was
+  extracted from the reference colorbar (`../colorbar.png`) with
+  `scripts/extract_ir_colormap.py`.
+- **`sat_ch1` (VIS)** — plain greyscale (`greyscale`), bright clouds → white.
+
 ## Anonymous fallback
 
 If no GCS credentials are configured (`GCP_CREDENTIALS_B64`, `GCP_CREDENTIALS`
@@ -56,8 +71,10 @@ Requires Go 1.22+ and `libgdal-dev` (cgo).
 | `TILE_CACHE_MAX_SIZE` | `2000` | Max LRU tile cache entries |
 | `COG_POOL_MAX_SIZE` | `50` | Max open GDAL datasets |
 | `GDAL_CACHEMAX` | `500` | GDAL internal cache (MB) |
-| `BAND_SAT_CH0_MIN/MAX` | `0` / `250` | VIS render range override |
-| `BAND_SAT_CH1_MIN/MAX` | `-35` / `250` | IR render range override |
+| `BAND_SAT_CH0_MIN/MAX` | `180` / `255` | IR (LWIR, ~Kelvin) render range override |
+| `BAND_SAT_CH1_MIN/MAX` | `-35` / `250` | VIS render range override |
+| `BAND_<NAME>_COLORMAP` | per band | Colormap override: `viridis`, `plasma`, `greyscale`, `ir_enhanced` |
+| `BAND_<NAME>_INVERT` | per band | Flip a band's colormap direction (`true`/`false`) |
 | `GCS_ANONYMOUS` | — | Force unauthenticated GCS access |
 | `GCP_CREDENTIALS_B64` | — | Base64 service account JSON (Cloud Run) |
 | `AIRPORTS_AWC_URL` | AWC bulk cache URL | Source for the live station list |

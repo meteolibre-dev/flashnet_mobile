@@ -48,8 +48,8 @@ func generateTileRGBA(data []float32, band string, nodata *float64, tileSize int
 	return &result
 }
 
-// renderGenericTile applies a pre-computed colormap LUT (viridis/plasma) or
-// a grayscale fallback.
+// renderGenericTile applies a pre-computed colormap LUT (viridis/plasma/
+// greyscale/ir_enhanced) or a grayscale fallback.
 func renderGenericTile(data []float32, rgba []byte, nodataMask []bool, cfg *BandConfig, tileSize int) {
 	range_ := cfg.Max - cfg.Min
 	if range_ == 0 {
