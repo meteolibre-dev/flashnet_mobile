@@ -93,7 +93,12 @@ func obsURL(ts string) string {
 
 func fetchObsManifest() error {
 	svc := getGCSService()
-	resp, err := svc.Objects.Get(getBucketName(), obsManifestPath()).Download()
+	// no-cache: latest.json is a PUBLIC GCS object (default Cache-Control
+	// public,max-age=3600) — without this, Google's frontend edge cache
+	// serves stale manifests to all server instances for up to an hour.
+	call := svc.Objects.Get(getBucketName(), obsManifestPath())
+	call.Header().Set("Cache-Control", "no-cache")
+	resp, err := call.Download()
 	if err != nil {
 		return err
 	}
