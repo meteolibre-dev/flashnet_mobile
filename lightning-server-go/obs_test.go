@@ -112,3 +112,51 @@ func TestInvalidateRunKeepsObs(t *testing.T) {
 func jsonUnmarshal(body string, v interface{}) error {
 	return json.Unmarshal([]byte(body), v)
 }
+
+func TestWithLatestObs(t *testing.T) {
+	fc := func(ts string) TimestampInfo {
+		return TimestampInfo{Timestamp: ts, RunTime: "run1", AvailableBands: bandNames()}
+	}
+
+	// 1. empty index → unchanged
+	setObsIndex()
+	got := withLatestObs([]TimestampInfo{fc("202608281200")})
+	if len(got) != 1 || got[0].Kind == "obs" {
+		t.Errorf("empty index must be a no-op: %+v", got)
+	}
+
+	// 2. fresh obs → prepended, sorted first, radar-only, no run_time
+	setObsIndex("202608281155", "202608281150")
+	obsIndex.Lock()
+	obsIndex.latest = "202608281155"
+	obsIndex.Unlock()
+	got = withLatestObs([]TimestampInfo{fc("202608281200"), fc("202608281210")})
+	if len(got) != 3 {
+		t.Fatalf("len = %d, want 3", len(got))
+	}
+	first := got[0]
+	if first.Timestamp != "202608281155" || first.Kind != "obs" {
+		t.Errorf("first = %+v, want obs 202608281155", first)
+	}
+	if first.RunTime != "" {
+		t.Errorf("obs entry must carry no run_time, got %q", first.RunTime)
+	}
+	if len(first.AvailableBands) != 1 || first.AvailableBands[0] != "radar" {
+		t.Errorf("obs bands = %v, want [radar]", first.AvailableBands)
+	}
+	if got[1].Kind == "obs" || got[2].Kind == "obs" {
+		t.Errorf("forecast entries must stay forecast: %+v", got)
+	}
+
+	// 3. obs matches an aged run frame → that frame is flagged, nothing prepended
+	got = withLatestObs([]TimestampInfo{fc("202608281155"), fc("202608281200")})
+	if len(got) != 2 {
+		t.Fatalf("dedupe: len = %d, want 2", len(got))
+	}
+	if got[0].Kind != "obs" {
+		t.Errorf("aged frame must be flagged obs: %+v", got[0])
+	}
+	if got[0].RunTime == "" {
+		t.Errorf("aged frame keeps its run_time for replay: %+v", got[0])
+	}
+}
