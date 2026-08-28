@@ -24,6 +24,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -207,6 +208,45 @@ func verifyObsReady(ts string) bool {
 		return true
 	}
 	return false
+}
+
+// withLatestObs prepends the latest observation to an /available result (or
+// marks the matching run frame as obs), so /available clients get truth at
+// "now" followed by the forecast frames: [latest obs, fcst T+10 ... T+180].
+// Observations are radar-only; the tile resolver serves observed tiles for
+// kind:"obs" timestamps automatically. No-op when the obs index is empty
+// (ingest down) — /available then behaves exactly as before.
+func withLatestObs(result []TimestampInfo) []TimestampInfo {
+	obsIndex.RLock()
+	obsTS := obsIndex.latest
+	obsIndex.RUnlock()
+	if obsTS == "" {
+		return result
+	}
+
+	for i := range result {
+		if result[i].Timestamp == obsTS {
+			// Aged forecast frame that now has an observation → the resolver
+			// already serves obs for it; flag it so clients label it correctly.
+			result[i].Kind = "obs"
+			return result
+		}
+	}
+
+	dt, err := parseTimestamp(obsTS)
+	if err != nil {
+		return result
+	}
+	result = append(result, TimestampInfo{
+		Timestamp:      obsTS,
+		Datetime:       dt.UTC().Format("2006-01-02T15:04:05Z"),
+		AvailableBands: []string{"radar"},
+		Kind:           "obs",
+		TiffURL: fmt.Sprintf("https://storage.googleapis.com/%s/%s",
+			getBucketName(), obsBlobPath(obsTS)),
+	})
+	sort.Slice(result, func(i, j int) bool { return result[i].Timestamp < result[j].Timestamp })
+	return result
 }
 
 // ---------------------------------------------------------------------------

@@ -357,6 +357,10 @@ func handleAvailable(ctx context.Context, days int, band string) (*AvailableResp
 		})
 	}
 
+	// Latest observation first (truth at "now"), then the forecast frames.
+	// See withLatestObs — no-op when the obs index is empty.
+	result = withLatestObs(result)
+
 	return &AvailableResponse{
 		Timestamps: result,
 		Count:      len(result),

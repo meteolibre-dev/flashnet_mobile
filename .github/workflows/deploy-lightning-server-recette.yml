@@ -13,7 +13,7 @@ name: Deploy Lightning Server Go (Recette)
 on:
   push:
     branches:
-      - feat/obs-radar-source
+      - feat/**
     paths:
       - 'lightning-server-go/**'
       - '.github/workflows/deploy-lightning-server-recette.yml'
