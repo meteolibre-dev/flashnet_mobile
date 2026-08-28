@@ -175,6 +175,7 @@ type TimestampInfo struct {
 	AvailableBands []string `json:"available_bands"`
 	RunTime        string   `json:"run_time,omitempty"`
 	TiffURL        string   `json:"tiff_url,omitempty"`
+	Kind           string   `json:"kind,omitempty"` // "obs" | "forecast" (set by /timeline)
 }
 
 type AvailableResponse struct {
@@ -269,6 +270,9 @@ func handleAvailable(ctx context.Context, days int, band string) (*AvailableResp
 		sort.Sort(sort.Reverse(sort.StringSlice(allRunSubfolders)))
 		latestSub = allRunSubfolders[0]
 		log.Printf("/available: using latest run '%s'", latestSub)
+
+		// Remember the latest run for the live-view obs resolver (obs.go)
+		setLatestRun(latestSub)
 
 		// Evict stale cache entries
 		tileCache.InvalidateRun(latestSub)

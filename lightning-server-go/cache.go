@@ -10,11 +10,14 @@ import (
 )
 
 // CacheKey is the composite key for a tile cache entry.
+// Source distinguishes resolved data origins ("obs" vs "forecast") so an
+// observed tile and a forecast tile for the same timestamp never collide.
 type CacheKey struct {
 	Z, X, Y  int
 	Band     string
 	Time     string
 	RunTime  string
+	Source   string
 }
 
 // LRUCache is a thread-safe fixed-size LRU cache for byte slices (PNG tiles).
@@ -93,13 +96,18 @@ func (c *LRUCache) InvalidateAll() int {
 	return n
 }
 
-// InvalidateRun evicts entries whose RunTime differs from the given run_time.
+// InvalidateRun evicts forecast entries whose RunTime differs from the given
+// run_time. Observed-radar entries (Source == "obs") are immutable once
+// uploaded and are never invalidated by run rotation.
 // Returns the number of entries removed.
 func (c *LRUCache) InvalidateRun(runTime string) int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	var toRemove []CacheKey
 	for key := range c.items {
+		if key.Source == "obs" {
+			continue
+		}
 		if key.RunTime != runTime {
 			toRemove = append(toRemove, key)
 		}

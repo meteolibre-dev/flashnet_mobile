@@ -29,7 +29,7 @@ A raster tile server for weather forecasting over **Europe**. It serves pre-rend
 ### Tiles (main usage)
 
 ```
-GET /tiles/{z}/{x}/{y}.png?band={band}&time={YYYYMMDDHHMM}&run_time={optional}
+GET /tiles/{z}/{x}/{y}.png?band={band}&time={YYYYMMDDHHMM}&run_time={optional}&source={optional}
 ```
 
 | Param | Required | Description |
@@ -38,8 +38,9 @@ GET /tiles/{z}/{x}/{y}.png?band={band}&time={YYYYMMDDHHMM}&run_time={optional}
 | `band` | ✅ | One of the band keys above (e.g. `lightning`) |
 | `time` | ✅ | Forecast timestamp, UTC, format `YYYYMMDDHHMM` (e.g. `202601190100`) |
 | `run_time` | – | Pin a specific model run, format `YYYY-MM-DD_HH-MM_region` (e.g. `2026-01-19_08-20_europe`). Optional — if omitted, the latest run containing that timestamp is auto-discovered. |
+| `source` | – | Force data source: `obs` (observed radar) or `forecast`. Default `auto` — see **Observed radar (truth) vs forecast** below. |
 
-Returns a 256×256 PNG. Headers include `Cache-Control: public, max-age=300` and `X-Cache: HIT|MISS`.
+Returns a 256×256 PNG. Headers include `Cache-Control: public, max-age=300`, `X-Cache: HIT|MISS` and `X-Source: obs|forecast` (which source backed the tile).
 If no data exists for the tile, a **fully transparent PNG** is returned (HTTP 200).
 
 Example:
@@ -53,10 +54,11 @@ https://tiles.meteolibre.dev/tiles/6/32/22.png?band=lightning&time=202601190100
 | Endpoint | Description |
 |---|---|
 | `GET /available?days=2&band=lightning` | Scans storage for **actually available** forecast timesteps (days: 1–7). Returns timestamps with `datetime`, `available_bands`, `run_time`. |
+| `GET /timeline?days=2&obs_hours=3` | **Merged scrubber timeline**: recent observed radar (truth, 5-min cadence) + latest run's forecast frames, each entry tagged `kind: obs\|forecast`. Timestamps present in both are resolved to `obs` (matches the tile resolver). Observed frames are `radar`-only; `latest_obs_ts` marks the truth/prediction seam. |
 | `GET /history/dates?days=30` | Dates with data (days: 1–90) |
 | `GET /history/dates/{YYYY-MM-DD}?band=lightning` | Model runs and timesteps for a given date |
 | `GET /times?hours=24` | Generated list of the last N hourly timestamps (hours: 1–72) — informational only |
-| `GET /times/{YYYYMMDDHHMM}` | COG URLs per band for a timestamp |
+| `GET /times/{YYYYMMDDHHMM}` | COG URLs per band for a timestamp (includes `source` and radar `obs_available`) |
 
 ### Metadata & data
 
@@ -75,7 +77,39 @@ https://tiles.meteolibre.dev/tiles/6/32/22.png?band=lightning&time=202601190100
 | `GET /` | API info |
 | `GET /health` | Health check |
 | `GET /bands` | Band configuration (min/max/colormap) |
+| `GET /obs/status` | Observed-radar index status (latest obs timestamp, count, last error) |
 | `GET /cache/stats` | Server tile cache stats |
+
+---
+
+## Observed radar (truth) vs forecast
+
+For `band=radar`, the server automatically serves **observed OPERA radar** for
+timestamps that have already happened (a 5-minute ingest publishes true radar
+COGs to `observations/` in the same bucket), and the **model forecast** for
+future timestamps. This makes the timeline seamless: past = truth, future =
+prediction.
+
+Resolution rules (`source=auto`, the default):
+
+- `band=radar` **and** live view (`run_time` omitted, or equal to the latest
+  run from `/available`) **and** the timestamp exists in the observed index
+  → **observed radar** wins (an OBS frame and its prediction never blend)
+- Explicit historical `run_time` → served **exactly as requested** (replays
+  are never hijacked by observations)
+- Everything else → forecast (latest run)
+
+The observed index is an in-memory mirror of `observations/latest.json`
+refreshed every `OBS_REFRESH_SECONDS` (default 60) — no GCS round trip on the
+tile hot path. If the ingest is down, the server transparently degrades to
+forecast-only serving. `GET /obs/status` exposes index health.
+
+Observed frames exist only for `radar`; other bands ignore this mechanism.
+
+`GET /timeline` is the discovery counterpart of this mechanism: use it to
+build the scrubber (past steps = `kind: "obs"`, future steps =
+`kind: "forecast"`), and request tiles exactly as before — the resolver
+picks the right source for each step automatically.
 
 ---
 

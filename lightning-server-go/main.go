@@ -26,6 +26,9 @@ func main() {
 	// GCS auth for GDAL's /vsigs/ filesystem
 	setupGDALGCSAuth()
 
+	// Observed-radar (OPERA) manifest index — background refresh, non-fatal
+	startObsIndexRefresher()
+
 	log.Printf("Starting Lightning Server Go on port %s", Port)
 	log.Printf("Data source: %s", BucketBaseURL)
 	log.Printf("Bucket name: %s", getBucketName())

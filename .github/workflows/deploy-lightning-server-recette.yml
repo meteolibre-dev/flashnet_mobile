@@ -1,0 +1,96 @@
+name: Deploy Lightning Server Go (Recette)
+
+# Recette (staging) deployment — tests before production.
+# Deploys the Cloud Run service `lightning-server-go-recette` on every push
+# to the feature branch. Production (`lightning-server-go`) is only updated
+# when the branch is merged to main (see deploy-lightning-server-v2.yml).
+#
+# Promotion flow:
+#   1. push to feat/obs-radar-source   → recette auto-deploys
+#   2. verify: https://lightning-server-go-recette-<hash>-europe-west3.run.app
+#   3. open PR → merge to main         → production auto-deploys
+
+on:
+  push:
+    branches:
+      - feat/obs-radar-source
+    paths:
+      - 'lightning-server-go/**'
+      - '.github/workflows/deploy-lightning-server-recette.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-lightning-server-go-recette
+  cancel-in-progress: true
+
+env:
+  PROJECT_ID: meteoforecast
+  GAR_LOCATION: europe-west3
+  REPOSITORY: flashnet-repo
+
+jobs:
+  deploy-go-recette:
+    name: Build & Deploy Go (GDAL cgo) — Recette
+    runs-on: ubuntu-latest
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+    env:
+      SERVICE: lightning-server-go-recette
+      IMAGE_NAME: lightning-server-go
+      CONTEXT_DIR: lightning-server-go
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Google Auth
+        id: auth
+        uses: 'google-github-actions/auth@v2'
+        with:
+          credentials_json: '${{ secrets.GCP_CREDENTIALS }}'
+
+      - name: 'Set up Cloud SDK'
+        uses: 'google-github-actions/setup-gcloud@v2'
+
+      - name: 'Docker Auth'
+        run: 'gcloud auth configure-docker ${{ env.GAR_LOCATION }}-docker.pkg.dev --quiet'
+
+      - name: Get Short Git SHA
+        id: git-sha
+        run: echo "SHORT_SHA=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: 'Build and Push Container Image'
+        run: |
+          docker build \
+            -f ${{ env.CONTEXT_DIR }}/Dockerfile \
+            --tag ${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:recette-${{ steps.git-sha.outputs.SHORT_SHA }} \
+            --tag ${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:recette-latest \
+            ${{ env.CONTEXT_DIR }}
+
+          docker push ${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:recette-${{ steps.git-sha.outputs.SHORT_SHA }}
+          docker push ${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:recette-latest
+
+      - name: 'Deploy to Cloud Run (Recette)'
+        run: |
+          # Encode credentials to base64 to handle special characters
+          CREDENTIALS_B64=$(echo '${{ secrets.GCP_CREDENTIALS }}' | base64 -w 0)
+
+          gcloud run deploy ${{ env.SERVICE }} \
+            --image ${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:recette-${{ steps.git-sha.outputs.SHORT_SHA }} \
+            --region ${{ env.GAR_LOCATION }} \
+            --project ${{ env.PROJECT_ID }} \
+            --platform managed \
+            --allow-unauthenticated \
+            --memory 2Gi \
+            --cpu 2 \
+            --min-instances 0 \
+            --max-instances 2 \
+            --set-env-vars BUCKET_BASE_URL=gs://inference_result_meteolibre_forecast/forecasts,GCP_CREDENTIALS_B64=$CREDENTIALS_B64,GOMAXPROCS=2
+
+      - name: 'Recette URL'
+        run: |
+          URL=$(gcloud run services describe ${{ env.SERVICE }} --region ${{ env.GAR_LOCATION }} --project ${{ env.PROJECT_ID }} --format 'value(status.url)')
+          echo "Recette deployed: $URL"
+          echo "Smoke test:"
+          curl -s "$URL/health" && echo
+          curl -s "$URL/obs/status" | head -c 300 && echo
