@@ -270,6 +270,9 @@ func handleAvailable(ctx context.Context, days int, band string) (*AvailableResp
 		latestSub = allRunSubfolders[0]
 		log.Printf("/available: using latest run '%s'", latestSub)
 
+		// Remember the latest run for the live-view obs resolver (obs.go)
+		setLatestRun(latestSub)
+
 		// Evict stale cache entries
 		tileCache.InvalidateRun(latestSub)
 

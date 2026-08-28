@@ -4,7 +4,10 @@ package main
 // config.go — Band configuration and server constants
 // ============================================================================
 
-import "os"
+import (
+	"os"
+	"time"
+)
 
 // BandConfig describes how to render a single forecast band/channel.
 type BandConfig struct {
@@ -93,6 +96,10 @@ var LightningDefaultColor = [4]byte{255, 255, 0, 150}
 var (
 	BucketBaseURL = envOr("BUCKET_BASE_URL", "gs://inference_result_meteolibre_forecast/forecasts")
 	Port          = envOr("PORT", "3001")
+
+	// Observed-radar (OPERA) source — see obs.go. Same bucket as forecasts.
+	ObsPrefix          = envOr("OBS_PREFIX", "observations")
+	ObsRefreshInterval = time.Duration(atoiOr(envOr("OBS_REFRESH_SECONDS", "60"), 60)) * time.Second
 
 	// Tile cache
 	TileCacheMaxSize = atoiOr(envOr("TILE_CACHE_MAX_SIZE", "2000"), 2000)

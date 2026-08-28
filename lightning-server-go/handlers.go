@@ -68,6 +68,9 @@ func registerRoutes(mux *http.ServeMux) {
 	// Cache management
 	mux.HandleFunc("/cache/stats", handleCacheStats)
 	mux.HandleFunc("/cache/clear", handleCacheClear)
+
+	// Observed-radar source
+	mux.HandleFunc("/obs/status", handleObsStatus)
 }
 
 // ---------------------------------------------------------------------------
@@ -240,11 +243,16 @@ func handleCheckTimestamp(w http.ResponseWriter, r *http.Request) {
 
 	results := make(map[string]interface{})
 	for band := range BANDS {
-		url := getCOGUrl(ts, band, "")
-		results[band] = map[string]interface{}{
-			"url":     url,
+		res := resolveCOG(ts, band, "", "")
+		entry := map[string]interface{}{
+			"url":     res.URL,
+			"source":  res.Source,
 			"checked": false,
 		}
+		if band == "radar" {
+			entry["obs_available"] = obsAvailable(ts)
+		}
+		results[band] = entry
 	}
 	writeJSON(w, 200, map[string]interface{}{
 		"timestamp": ts,
@@ -271,6 +279,7 @@ func handleTilePNG(w http.ResponseWriter, r *http.Request) {
 	band := queryString(r, "band", "")
 	timeStr := queryString(r, "time", "")
 	runTime := queryString(r, "run_time", "")
+	sourceParam := queryString(r, "source", "auto")
 
 	if band == "" || timeStr == "" {
 		writeError(w, 400, "band and time are required")
@@ -282,19 +291,24 @@ func handleTilePNG(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cacheKey := CacheKey{Z: z, X: x, Y: y, Band: band, Time: timeStr, RunTime: runTime}
+	// Resolve data source (obs vs forecast) BEFORE the cache lookup —
+	// resolution is an in-memory map lookup, safe on the hot path.
+	res := resolveCOG(timeStr, band, runTime, sourceParam)
+
+	cacheKey := CacheKey{Z: z, X: x, Y: y, Band: band, Time: timeStr, RunTime: runTime, Source: res.Source}
 
 	// Check LRU cache
 	if cached, ok := tileCache.Get(cacheKey); ok {
 		setCacheHeaders(w, 300)
 		w.Header().Set("X-Cache", "HIT")
+		w.Header().Set("X-Source", res.Source)
 		w.Header().Set("Content-Type", "image/png")
 		w.Write(cached)
 		return
 	}
 
 	// Generate tile
-	url := getCOGUrl(timeStr, band, runTime)
+	url := res.URL
 
 	// Retry logic for transient GCS/network errors
 	var rgba *[256 * 256 * 4]byte
@@ -313,6 +327,7 @@ func handleTilePNG(w http.ResponseWriter, r *http.Request) {
 			tileCache.Put(cacheKey, pngBytes)
 			setCacheHeaders(w, 300)
 			w.Header().Set("X-Cache", "MISS")
+			w.Header().Set("X-Source", res.Source)
 			w.Header().Set("Content-Type", "image/png")
 			w.Write(pngBytes)
 			return
@@ -341,6 +356,7 @@ func handleTilePNG(w http.ResponseWriter, r *http.Request) {
 
 	setCacheHeaders(w, 300)
 	w.Header().Set("X-Cache", "MISS")
+	w.Header().Set("X-Source", res.Source)
 	w.Header().Set("Content-Type", "image/png")
 	w.Write(pngBytes)
 }
@@ -360,7 +376,7 @@ func handleTileJSON(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	url := getCOGUrl(timeStr, band, runTime)
+	url := resolveCOG(timeStr, band, runTime, "").URL
 	info, err := getCOGInfo(url)
 	if err != nil {
 		writeError(w, 500, err.Error())
@@ -400,7 +416,7 @@ func handleBounds(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	url := getCOGUrl(timeStr, band, runTime)
+	url := resolveCOG(timeStr, band, runTime, "").URL
 	info, err := getCOGInfo(url)
 	if err != nil {
 		writeJSON(w, 200, map[string]interface{}{
@@ -446,7 +462,7 @@ func handleInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	url := getCOGUrl(timeStr, band, runTime)
+	url := resolveCOG(timeStr, band, runTime, "").URL
 	info, err := getCOGInfo(url)
 	if err != nil {
 		writeError(w, 500, err.Error())
@@ -523,7 +539,7 @@ func handlePoint(w http.ResponseWriter, r *http.Request) {
 	for i := startIdx; i < len(tsList); i++ {
 		ts := tsList[i].Timestamp
 
-		url := getCOGUrl(ts, band, tsList[i].RunTime)
+		url := resolveCOG(ts, band, tsList[i].RunTime, "").URL
 		val, err := readPoint(url, lat, lon)
 
 		if err != nil {
@@ -579,12 +595,19 @@ func handlePreview(w http.ResponseWriter, r *http.Request) {
 		height = 2048
 	}
 
-	if !verifyCogFileReady(timeStr, band) {
+	res := resolveCOG(timeStr, band, "", "")
+
+	if res.Source == "obs" {
+		if !verifyObsReady(timeStr) {
+			writeError(w, 404, "Observed radar file not ready")
+			return
+		}
+	} else if !verifyCogFileReady(timeStr, band) {
 		writeError(w, 404, "File not ready or still uploading")
 		return
 	}
 
-	url := getCOGUrl(timeStr, band, "")
+	url := res.URL
 	data, imgW, imgH, nodata, err := readPreview(url, width, height)
 	if err != nil {
 		writeError(w, 500, fmt.Sprintf("Error generating preview: %s", err))
