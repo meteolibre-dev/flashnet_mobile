@@ -53,6 +53,7 @@ func registerRoutes(mux *http.ServeMux) {
 	// Discovery
 	mux.HandleFunc("/times", handleTimes)
 	mux.HandleFunc("/available", handleAvailableHTTP)
+	mux.HandleFunc("/timeline", handleTimelineHTTP)
 	mux.HandleFunc("/history/dates", handleHistoryDatesHTTP)
 	mux.HandleFunc("/history/dates/", handleHistoryDateRunsHTTP)
 	mux.HandleFunc("/times/", handleCheckTimestamp)
@@ -520,23 +521,39 @@ func handlePoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get available timestamps
-	available, err := handleAvailable(r.Context(), 2, band)
+	// Build the merged timeline: recent observed radar (5-min truth) + latest
+	// run's forecast frames. Non-radar bands skip obs entries (they only
+	// exist on the forecast 10-min grid).
+	timeline, err := buildTimeline(r.Context(), 2, 3)
 	if err != nil {
 		writeError(w, 500, err.Error())
 		return
 	}
 
-	// Sample last 18 timesteps
-	tsList := available.Timestamps
-	startIdx := 0
-	if len(tsList) > 18 {
-		startIdx = len(tsList) - 18
+	// Sample: ALL forecast frames + the last 18 observed frames (chronological)
+	isRadar := band == "radar"
+	tsList := make([]TimestampInfo, 0, 36)
+	obsSeen := 0
+	for i := len(timeline.Timestamps) - 1; i >= 0; i-- {
+		e := timeline.Timestamps[i]
+		if e.Kind == "obs" {
+			if !isRadar {
+				continue
+			}
+			obsSeen++
+			if obsSeen > 18 {
+				continue
+			}
+		}
+		tsList = append(tsList, e)
+	}
+	// reverse back to chronological order
+	for i, j := 0, len(tsList)-1; i < j; i, j = i+1, j-1 {
+		tsList[i], tsList[j] = tsList[j], tsList[i]
 	}
 
-	isRadar := band == "radar"
 	results := make([]map[string]interface{}, 0)
-	for i := startIdx; i < len(tsList); i++ {
+	for i := range tsList {
 		ts := tsList[i].Timestamp
 
 		url := resolveCOG(ts, band, tsList[i].RunTime, "").URL

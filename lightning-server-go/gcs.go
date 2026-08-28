@@ -175,6 +175,7 @@ type TimestampInfo struct {
 	AvailableBands []string `json:"available_bands"`
 	RunTime        string   `json:"run_time,omitempty"`
 	TiffURL        string   `json:"tiff_url,omitempty"`
+	Kind           string   `json:"kind,omitempty"` // "obs" | "forecast" (set by /timeline)
 }
 
 type AvailableResponse struct {

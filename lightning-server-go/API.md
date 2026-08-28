@@ -54,6 +54,7 @@ https://tiles.meteolibre.dev/tiles/6/32/22.png?band=lightning&time=202601190100
 | Endpoint | Description |
 |---|---|
 | `GET /available?days=2&band=lightning` | Scans storage for **actually available** forecast timesteps (days: 1–7). Returns timestamps with `datetime`, `available_bands`, `run_time`. |
+| `GET /timeline?days=2&obs_hours=3` | **Merged scrubber timeline**: recent observed radar (truth, 5-min cadence) + latest run's forecast frames, each entry tagged `kind: obs\|forecast`. Timestamps present in both are resolved to `obs` (matches the tile resolver). Observed frames are `radar`-only; `latest_obs_ts` marks the truth/prediction seam. |
 | `GET /history/dates?days=30` | Dates with data (days: 1–90) |
 | `GET /history/dates/{YYYY-MM-DD}?band=lightning` | Model runs and timesteps for a given date |
 | `GET /times?hours=24` | Generated list of the last N hourly timestamps (hours: 1–72) — informational only |
@@ -104,6 +105,11 @@ tile hot path. If the ingest is down, the server transparently degrades to
 forecast-only serving. `GET /obs/status` exposes index health.
 
 Observed frames exist only for `radar`; other bands ignore this mechanism.
+
+`GET /timeline` is the discovery counterpart of this mechanism: use it to
+build the scrubber (past steps = `kind: "obs"`, future steps =
+`kind: "forecast"`), and request tiles exactly as before — the resolver
+picks the right source for each step automatically.
 
 ---
 
