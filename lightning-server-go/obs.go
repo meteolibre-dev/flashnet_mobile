@@ -24,6 +24,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -87,24 +88,43 @@ func obsURL(ts string) string {
 	return "/vsigs/" + getBucketName() + "/" + obsBlobPath(ts)
 }
 
+// fetchObsManifestBody reads latest.json, immune to Google's frontend edge
+// cache. latest.json is a PUBLIC GCS object; without explicit Cache-Control
+// metadata the edge applies its default (public,max-age=3600) and serves one
+// stale snapshot to every server instance for up to an hour — the no-cache
+// request header proved unreliable in practice. A unique query param per
+// fetch creates a fresh cache key (guaranteed miss). Falls back to the
+// authenticated GCS client if the public URL fails (e.g. bucket goes private).
+func fetchObsManifestBody() ([]byte, error) {
+	pub := fmt.Sprintf(
+		"https://storage.googleapis.com/storage/v1/b/%s/o/%s?alt=media&cb=%d",
+		getBucketName(), url.PathEscape(obsManifestPath()), time.Now().UnixMilli(),
+	)
+	resp, err := http.Get(pub)
+	if err == nil {
+		if resp.StatusCode == http.StatusOK {
+			defer resp.Body.Close()
+			return io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MiB cap
+		}
+		resp.Body.Close()
+	}
+
+	// fallback: authenticated client
+	svc := getGCSService()
+	resp2, err := svc.Objects.Get(getBucketName(), obsManifestPath()).Download()
+	if err != nil {
+		return nil, err
+	}
+	defer resp2.Body.Close()
+	return io.ReadAll(io.LimitReader(resp2.Body, 1<<20)) // 1 MiB cap
+}
+
 // ---------------------------------------------------------------------------
 // Manifest fetching / index maintenance
 // ---------------------------------------------------------------------------
 
 func fetchObsManifest() error {
-	svc := getGCSService()
-	// no-cache: latest.json is a PUBLIC GCS object (default Cache-Control
-	// public,max-age=3600) — without this, Google's frontend edge cache
-	// serves stale manifests to all server instances for up to an hour.
-	call := svc.Objects.Get(getBucketName(), obsManifestPath())
-	call.Header().Set("Cache-Control", "no-cache")
-	resp, err := call.Download()
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MiB cap
+	body, err := fetchObsManifestBody()
 	if err != nil {
 		return err
 	}
