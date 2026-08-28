@@ -53,8 +53,8 @@ https://tiles.meteolibre.dev/tiles/6/32/22.png?band=lightning&time=202601190100
 
 | Endpoint | Description |
 |---|---|
-| `GET /available?days=2&band=lightning` | Scans storage for **actually available** forecast timesteps (days: 1–7). Returns timestamps with `datetime`, `available_bands`, `run_time`. |
-| `GET /timeline?days=2&obs_hours=3` | **Merged scrubber timeline**: recent observed radar (truth, 5-min cadence) + latest run's forecast frames, each entry tagged `kind: obs\|forecast`. Timestamps present in both are resolved to `obs` (matches the tile resolver). Observed frames are `radar`-only; `latest_obs_ts` marks the truth/prediction seam. |
+| `GET /available?days=2&band=lightning` | Scans storage for **actually available** forecast timesteps (days: 1–7). Returns timestamps with `datetime`, `available_bands`, `run_time`. The **latest observation** is prepended as the first entry (`kind: "obs"`, `available_bands: ["radar"]`, empty `run_time`) so clients get truth at "now" followed by the forecast — no client change needed (tile resolution picks obs automatically, see below). Omitted when the obs index is empty. |
+| `GET /timeline?days=2&obs_hours=3` | **Merged scrubber timeline**: recent observed radar (truth, 5-min cadence, `obs_hours` window, default 3) + latest run's forecast frames, each entry tagged `kind: obs\|forecast`. Timestamps present in both are resolved to `obs` (matches the tile resolver). Observed frames are `radar`-only; the obs/forecast boundary is the truth/prediction seam. |
 | `GET /history/dates?days=30` | Dates with data (days: 1–90) |
 | `GET /history/dates/{YYYY-MM-DD}?band=lightning` | Model runs and timesteps for a given date |
 | `GET /times?hours=24` | Generated list of the last N hourly timestamps (hours: 1–72) — informational only |
@@ -67,7 +67,7 @@ https://tiles.meteolibre.dev/tiles/6/32/22.png?band=lightning&time=202601190100
 | `GET /tilejson?band={band}&time={time}` | TileJSON 2.1.0 document for the requested band/time |
 | `GET /bounds?band={band}&time={time}` | Geographic bounds, size, nodata, overviews |
 | `GET /info?band={band}&time={time}` | Full COG metadata + band render config |
-| `GET /point?lat={lat}&lon={lon}&band={band}` | Time series of values at a coordinate (last 18 available timesteps). For `radar`, values are converted to mm/h. |
+| `GET /point?lat={lat}&lon={lon}&band={band}` | Time series of values at a coordinate over the **merged timeline** (last 18 observed radar frames + all forecast steps). For `radar`, values are converted to mm/h; past steps sample observed COGs, future steps forecast COGs. |
 | `GET /preview?band={band}&time={time}&width=1024&height=1024` | Full-extent rendered PNG (width/height: 256–2048) |
 
 ### Misc
@@ -101,7 +101,9 @@ Resolution rules (`source=auto`, the default):
 
 The observed index is an in-memory mirror of `observations/latest.json`
 refreshed every `OBS_REFRESH_SECONDS` (default 60) — no GCS round trip on the
-tile hot path. If the ingest is down, the server transparently degrades to
+tile hot path (the manifest fetch uses a cache-busting URL so Google's edge
+cache can never pin a stale snapshot; the ingest sets `max-age=60` on the
+object). If the ingest is down, the server transparently degrades to
 forecast-only serving. `GET /obs/status` exposes index health.
 
 Observed frames exist only for `radar`; other bands ignore this mechanism.
@@ -109,7 +111,10 @@ Observed frames exist only for `radar`; other bands ignore this mechanism.
 `GET /timeline` is the discovery counterpart of this mechanism: use it to
 build the scrubber (past steps = `kind: "obs"`, future steps =
 `kind: "forecast"`), and request tiles exactly as before — the resolver
-picks the right source for each step automatically.
+picks the right source for each step automatically. `GET /available`
+participates too: its first entry is always the latest observation, so
+clients that only consume `/available` display truth at "now" followed by
+the forecast without any change.
 
 ---
 
