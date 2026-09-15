@@ -32,6 +32,13 @@ type BandConfig struct {
 	// where the warm greys segment ends and the cold spectral segment begins.
 	SplitValue float64 `json:"-"`
 
+	// NodataColor: hex color ("#RRGGBB" or "#RRGGBBAA") rendered for
+	// no-data pixels (NaN / nodata) instead of transparency. Used by
+	// radar_dbz: grey outside the OPERA+MRMS coverage union. Empty =
+	// transparent (default, all other bands). Override: BAND_<NAME>_NODATA_COLOR.
+	NodataColor string `json:"nodata_color,omitempty"`
+	nodataRGBA  *[4]byte
+
 	colormap *[256][4]byte // pre-computed 256-entry RGBA LUT
 }
 
@@ -106,14 +113,15 @@ var BANDS = map[string]*BandConfig{
 	// render transparent; old v1 COGs (2 sat bands) serve fully transparent
 	// tiles / null values for this band instead of failing.
 	"radar_dbz": {
-		Name:      "Radar Reflectivity Forecast (dBZ)",
-		Min:       5,
-		Max:       65,
-		Colormap:  "radar_nws",
-		Invert:    false,
-		DType:     "float32",
-		FileBand:  "sat",
-		BandIndex: 3,
+		Name:       "Radar Reflectivity Forecast (dBZ)",
+		Min:        5,
+		Max:        65,
+		Colormap:   "radar_nws",
+		Invert:     false,
+		DType:      "float32",
+		FileBand:   "sat",
+		BandIndex:  3,
+		NodataColor: "#9e9e9e", // grey outside the OPERA+MRMS coverage union
 	},
 	"metar_tmpc": {
 		Name:      "METAR Temperature (°C)",
@@ -239,6 +247,9 @@ func init() {
 		if v := os.Getenv(envPrefix + "_INVERT"); v != "" {
 			b, err := strconv.ParseBool(v)
 			cfg.Invert = err == nil && b
+		}
+		if v := os.Getenv(envPrefix + "_NODATA_COLOR"); v != "" {
+			cfg.NodataColor = v
 		}
 	}
 }

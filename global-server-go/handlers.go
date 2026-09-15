@@ -140,7 +140,7 @@ func handleBands(w http.ResponseWriter, r *http.Request) {
 	setCacheHeaders(w, 300)
 	result := make(map[string]interface{})
 	for name, cfg := range BANDS {
-		result[name] = map[string]interface{}{
+		entry := map[string]interface{}{
 			"name":       cfg.Name,
 			"min":        cfg.Min,
 			"max":        cfg.Max,
@@ -150,6 +150,10 @@ func handleBands(w http.ResponseWriter, r *http.Request) {
 			"file_band":  cfg.FileBand,
 			"band_index": cfg.BandIndex,
 		}
+		if cfg.NodataColor != "" {
+			entry["nodata_color"] = cfg.NodataColor
+		}
+		result[name] = entry
 	}
 	writeJSON(w, 200, result)
 }
@@ -650,6 +654,7 @@ func handlePreview(w http.ResponseWriter, r *http.Request) {
 	setCacheHeaders(w, 300)
 	band := queryString(r, "band", "")
 	timeStr := queryString(r, "time", "")
+	runTime := queryString(r, "run_time", "")
 	width := clampInt(queryInt(r, "width", 1024), 256, 4096)
 	height := clampInt(queryInt(r, "height", 1024), 256, 4096)
 
@@ -667,12 +672,12 @@ func handlePreview(w http.ResponseWriter, r *http.Request) {
 		height = 2048
 	}
 
-	if !verifyCogFileReady(timeStr, band) {
+	if !verifyCogFileReady(timeStr, band, runTime) {
 		writeError(w, 404, "File not ready or still uploading")
 		return
 	}
 
-	url := getCOGUrl(timeStr, band, "")
+	url := getCOGUrl(timeStr, band, runTime)
 	data, imgW, imgH, nodata, err := readPreview(url, cfg.BandIndex, width, height)
 	if err != nil {
 		writeError(w, 500, fmt.Sprintf("Error generating preview: %s", err))
@@ -727,7 +732,7 @@ func generatePreviewRGBA(data []float32, band string, nodata *float64, width, he
 	for i, v := range data {
 		off := i * 4
 		if nodataMask[i] {
-			rgba[off], rgba[off+1], rgba[off+2], rgba[off+3] = 0, 0, 0, 0
+			writeNodata(rgba, off, cfg)
 			continue
 		}
 

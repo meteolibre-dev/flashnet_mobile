@@ -24,10 +24,11 @@ The `radar_dbz` channel is served since v1.2: on v2 6-channel model configs
 the backend writes the radar reflectivity forecast (OPERA+MRMS DBZH, clamped
 to [-5, 65] dBZ) as **raster band 3** of `forecast_{ts}_sat.tif`, NaN
 outside the OPERA+MRMS coverage union (Europe + US). It renders with the
-classic NWS reflectivity palette over 5–65 dBZ; dry echoes (< 5 dBZ) and
-no-coverage pixels are transparent. Old v1 runs (2-band sat COGs) report
-the band but serve fully transparent tiles / null point values instead of
-failing.
+classic NWS reflectivity palette over 5–65 dBZ; dry echoes (< 5 dBZ) are
+transparent, and **no-coverage pixels render grey** (`#9e9e9e`, override
+with `BAND_RADAR_DBZ_NODATA_COLOR`, any `#RRGGBB[AA]`). Old v1 runs (2-band
+sat COGs) report the band but serve fully grey tiles / null point values
+instead of failing.
 
 Because both channels live in the same GeoTIFF, every COG read takes a
 1-based `bandIndex` parameter (IR = 1, VIS = 2, radar = 3) — this is the main code
@@ -87,8 +88,9 @@ Requires Go 1.22+ and `libgdal-dev` (cgo).
 | `BAND_SAT_CH0_MIN/MAX` | `10` / `230` | IR (LWIR counts, high = cold) render range override |
 | `BAND_SAT_CH0_SPLIT` | `150` | IR greys↔spectral segment boundary (counts) |
 | `BAND_SAT_CH1_MIN/MAX` | `-35` / `250` | VIS render range override |
-| `BAND_<NAME>_COLORMAP` | per band | Colormap override: `viridis`, `plasma`, `greyscale`, `ir_enhanced` |
+| `BAND_<NAME>_COLORMAP` | per band | Colormap override: `viridis`, `plasma`, `greyscale`, `ir_enhanced`, `radar_nws` |
 | `BAND_<NAME>_INVERT` | per band | Flip a band's colormap direction (`true`/`false`) |
+| `BAND_<NAME>_NODATA_COLOR` | per band | No-data (NaN) color, `#RRGGBB[AA]`; empty = transparent. Default set only for `radar_dbz` |
 | `GCS_ANONYMOUS` | — | Force unauthenticated GCS access |
 | `GCP_CREDENTIALS_B64` | — | Base64 service account JSON (Cloud Run) |
 | `AIRPORTS_AWC_URL` | AWC bulk cache URL | Source for the live station list |

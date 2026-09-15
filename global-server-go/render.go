@@ -61,7 +61,11 @@ func renderGenericTile(data []float32, rgba []byte, nodataMask []bool, cfg *Band
 		// Fallback: grayscale
 		for i, v := range data {
 			off := i * 4
-			if nodataMask[i] || v == 0 {
+			if nodataMask[i] {
+				writeNodata(rgba, off, cfg)
+				continue
+			}
+			if v == 0 {
 				rgba[off], rgba[off+1], rgba[off+2], rgba[off+3] = 0, 0, 0, 0
 				continue
 			}
@@ -81,7 +85,7 @@ func renderGenericTile(data []float32, rgba []byte, nodataMask []bool, cfg *Band
 	for i, v := range data {
 		off := i * 4
 		if nodataMask[i] {
-			rgba[off], rgba[off+1], rgba[off+2], rgba[off+3] = 0, 0, 0, 0
+			writeNodata(rgba, off, cfg)
 			continue
 		}
 
@@ -151,6 +155,18 @@ func renderAndEncodeTile(data []float32, band string, nodata *float64, tileSize 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// writeNodata writes the band's no-data color, or fully transparent when the
+// band has none (default). Used for NaN/nodata pixels — e.g. radar_dbz
+// renders grey outside the OPERA+MRMS coverage union instead of transparent.
+func writeNodata(rgba []byte, off int, cfg *BandConfig) {
+	if cfg.nodataRGBA != nil {
+		c := *cfg.nodataRGBA
+		rgba[off], rgba[off+1], rgba[off+2], rgba[off+3] = c[0], c[1], c[2], c[3]
+		return
+	}
+	rgba[off], rgba[off+1], rgba[off+2], rgba[off+3] = 0, 0, 0, 0
+}
 
 func isFinite32(v float32) bool {
 	return !math.IsNaN(float64(v)) && !math.IsInf(float64(v), 0)

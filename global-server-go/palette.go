@@ -4,7 +4,11 @@ package main
 // palette.go — Colormaps for the global model server
 // ============================================================================
 
-import "math"
+import (
+	"log"
+	"math"
+	"strings"
+)
 
 // viridisLUT and plasmaLUT are the exact matplotlib colormaps (256 entries).
 // Generated from the BIDS/colormap reference data (CC0).
@@ -43,7 +47,69 @@ func init() {
 		}
 		cfg.colormap = &lut
 		PrecomputedColormaps[name] = &lut
+
+		// Parse the optional no-data color (e.g. radar_dbz grey) into RGBA.
+		if cfg.NodataColor != "" {
+			if rgba, ok := parseHexColor(cfg.NodataColor); ok {
+				cfg.nodataRGBA = &rgba
+			} else {
+				logInvalidNodataColor(name, cfg.NodataColor)
+			}
+		}
 	}
+}
+
+func logInvalidNodataColor(band, color string) {
+	// Warn without failing the server — the band renders transparent instead.
+	log.Printf("warning: band %s: invalid NODATA_COLOR %q (expected #RRGGBB[AA]) — falling back to transparent", band, color)
+}
+
+// parseHexColor parses "#RGB", "#RRGGBB" or "#RRGGBBAA" (leading #
+// optional) into RGBA bytes. Alpha defaults to 255 (opaque).
+func parseHexColor(s string) ([4]byte, bool) {
+	out := [4]byte{0, 0, 0, 255}
+	s = strings.TrimPrefix(s, "#")
+
+	switch len(s) {
+	case 3, 4: // short form, e.g. "abc" / "abcd"
+		for i := 0; i < len(s); i++ {
+			v, ok := hexNibble(s[i])
+			if !ok {
+				return out, false
+			}
+			out[i] = v * 17 // 0xf → 0xff
+		}
+		if len(s) == 3 {
+			out[3] = 255
+		}
+	case 6, 8: // long form, e.g. "9e9e9e" / "9e9e9e80"
+		for i := 0; i < len(s)/2; i++ {
+			hi, ok1 := hexNibble(s[i*2])
+			lo, ok2 := hexNibble(s[i*2+1])
+			if !ok1 || !ok2 {
+				return out, false
+			}
+			out[i] = hi<<4 | lo
+		}
+		if len(s) == 6 {
+			out[3] = 255
+		}
+	default:
+		return out, false
+	}
+	return out, true
+}
+
+func hexNibble(c byte) (byte, bool) {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0', true
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10, true
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10, true
+	}
+	return 0, false
 }
 
 // buildRGBAFromRGB converts a 256-entry RGB LUT to RGBA (alpha=255),

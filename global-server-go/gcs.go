@@ -99,6 +99,10 @@ func getGCSService() *storagev1.Service {
 var forecastFileRe = regexp.MustCompile(`forecast_(\d{12})_([^.]+)\.tif$`)
 var forecastFileReFlat = regexp.MustCompile(`forecasts/[^/]+/forecast_(\d{12})_([^.]+)\.tif$`)
 
+// forecastNestedRe matches the compact run-folder layout:
+// forecasts/YYYYMMDD/YYYYMMDD_HHMM/forecast_{ts}_{band}.tif
+var forecastNestedRe = regexp.MustCompile(`^forecasts/(\d{8})/(\d{8}_\d{4})/forecast_(\d{12})_([^.]+)\.tif$`)
+
 // getCOGUrl generates the /vsigs/ URL for a given timestamp and logical band
 // (e.g. "sat_ch0" → forecast_{ts}_sat.tif).
 // When run_time is provided, it builds the path directly (skipping GCS scan).
@@ -158,9 +162,13 @@ func findH5Subfolder(timestamp string) (string, bool) {
 		}
 
 		for _, obj := range resp.Items {
-			m := forecastFileReFlat.FindStringSubmatch(obj.Name)
-			if m != nil && m[1] == timestamp {
-				// Extract subfolder
+			// Compact run-folder layout: forecasts/YYYYMMDD/{run}/forecast_{ts}_{band}.tif
+			if m := forecastNestedRe.FindStringSubmatch(obj.Name); m != nil && m[3] == timestamp {
+				tsToH5Subfolder.Store(timestamp, m[2])
+				return m[2], true
+			}
+			// Legacy flat layout: forecasts/YYYYMMDD/forecast_{ts}_{band}.tif
+			if m := forecastFileReFlat.FindStringSubmatch(obj.Name); m != nil && m[1] == timestamp {
 				rest := strings.TrimPrefix(obj.Name, prefix)
 				parts := strings.SplitN(rest, "/", 2)
 				if len(parts) > 1 {
@@ -176,7 +184,7 @@ func findH5Subfolder(timestamp string) (string, bool) {
 }
 
 // verifyCogFileReady checks that a COG file exists and has a reasonable size.
-func verifyCogFileReady(timestamp, band string) bool {
+func verifyCogFileReady(timestamp, band, runTime string) bool {
 	bucket := getBucketName()
 	svc := getGCSService()
 	ctx := context.Background()
@@ -187,7 +195,10 @@ func verifyCogFileReady(timestamp, band string) bool {
 	}
 
 	var blobName string
-	if h5Sub, ok := findH5Subfolder(timestamp); ok {
+	if runTime != "" {
+		runDate := extractRunDate(runTime)
+		blobName = fmt.Sprintf("forecasts/%s/%s/forecast_%s_%s.tif", runDate, runTime, timestamp, fileBand)
+	} else if h5Sub, ok := findH5Subfolder(timestamp); ok {
 		runDate := extractRunDate(h5Sub)
 		blobName = fmt.Sprintf("forecasts/%s/%s/forecast_%s_%s.tif", runDate, h5Sub, timestamp, fileBand)
 	} else {
