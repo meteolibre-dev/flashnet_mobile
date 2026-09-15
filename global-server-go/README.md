@@ -11,7 +11,7 @@ based on [lightning-server-go](../lightning-server-go) (which serves the local
 | **Model** | Local 1 km / 10 min | Global 0.1° / 1 h |
 | **Bucket** | `gs://inference_result_meteolibre_forecast` | `gs://inference_result_flashedges_forecast` |
 | **Layout** | `forecasts/YYYY-MM-DD/{run}/forecast_{ts}_{band}.tiff` | `forecasts/YYYYMMDD/YYYYMMDD_HHMM/forecast_{ts}_{band}.tif` |
-| **Bands** | lightning, radar, sat_ch0–2 (one band per file) | `sat_ch0` (IR) + `sat_ch1` (VIS) in `forecast_{ts}_sat.tif`; 7 `metar_*` bands (tmpc, dwpc, mslp, cloud_cover, p01m, wind_u, wind_v) in `forecast_{ts}_metar.tif` |
+| **Bands** | lightning, radar, sat_ch0–2 (one band per file) | `sat_ch0` (IR) + `sat_ch1` (VIS) in `forecast_{ts}_sat.tif`; `radar_dbz` as band 3 of the same file (v2 6-ch configs only); 7 `metar_*` bands (tmpc, dwpc, mslp, cloud_cover, p01m, wind_u, wind_v) in `forecast_{ts}_metar.tif` |
 | **Bounds** | Europe (-10, 33, 33, 65) | Global (-180, -90, 180, 90) |
 | **Raster size** | ~4000×4000 | 3600×1800 |
 
@@ -20,8 +20,17 @@ The `metar` COGs are served since v1.1: logical bands `metar_tmpc`,
 `metar_wind_u`, `metar_wind_v` (raster bands 1-7, same order as the dataset
 generator's `METAR_FEATURES`).
 
+The `radar_dbz` channel is served since v1.2: on v2 6-channel model configs
+the backend writes the radar reflectivity forecast (OPERA+MRMS DBZH, clamped
+to [-5, 65] dBZ) as **raster band 3** of `forecast_{ts}_sat.tif`, NaN
+outside the OPERA+MRMS coverage union (Europe + US). It renders with the
+classic NWS reflectivity palette over 5–65 dBZ; dry echoes (< 5 dBZ) and
+no-coverage pixels are transparent. Old v1 runs (2-band sat COGs) report
+the band but serve fully transparent tiles / null point values instead of
+failing.
+
 Because both channels live in the same GeoTIFF, every COG read takes a
-1-based `bandIndex` parameter (IR = 1, VIS = 2) — this is the main code
+1-based `bandIndex` parameter (IR = 1, VIS = 2, radar = 3) — this is the main code
 change vs the lightning server.
 
 ## Satellite palettes
@@ -115,8 +124,10 @@ GET /available?days=7
      { "timestamp": "202608231500", "available_bands": ["sat_ch0","sat_ch1"], ... } ] }
 
 GET /tiles/3/4/3.png?band=sat_ch1&time=202608231500&run_time=20260823_1500
+GET /tiles/4/8/5.png?band=radar_dbz&time=202608231500&run_time=20260823_1500
 GET /point?lat=48.85&lon=2.35&band=sat_ch0
 GET /point?lat=48.86&lon=2.35&band=metar_tmpc,metar_dwpc&steps=all&run_time=20260823_1500
+GET /point?lat=48.86&lon=2.35&band=radar_dbz&steps=all
 ```
 
 ### METAR airports

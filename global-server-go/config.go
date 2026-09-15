@@ -51,7 +51,9 @@ var defaultBounds = [4]float64{-180.0, -90.0, 180.0, 90.0}
 // BANDS maps logical band name → config.
 //
 // Satellite channels come from the forecast_{ts}_sat.tif COG:
-// raster band 1 = IR (sat_ch0), raster band 2 = VIS (sat_ch1).
+// raster band 1 = IR (sat_ch0), raster band 2 = VIS (sat_ch1). v2 6-channel
+// model configs additionally write raster band 3 = radar_dbz (the radar
+// reflectivity forecast, see below).
 //
 // The GMGSI channels are stored on a dimensionless 0–255 source imagery
 // scale (digital counts / scaled radiance, per NOAA GMGSI docs; the dataset
@@ -96,6 +98,22 @@ var BANDS = map[string]*BandConfig{
 		DType:     "float32",
 		FileBand:  "sat",
 		BandIndex: 2,
+	},
+	// Radar reflectivity forecast (OPERA + MRMS composite, dBZ): raster
+	// band 3 of the sat COG, written by the backend only on v2 6-channel
+	// model configs (use_radar). NaN outside the OPERA+MRMS coverage union
+	// (Europe + US); values are clamped to [-5, 65] dBZ. Dry echoes (< Min)
+	// render transparent; old v1 COGs (2 sat bands) serve fully transparent
+	// tiles / null values for this band instead of failing.
+	"radar_dbz": {
+		Name:      "Radar Reflectivity Forecast (dBZ)",
+		Min:       5,
+		Max:       65,
+		Colormap:  "radar_nws",
+		Invert:    false,
+		DType:     "float32",
+		FileBand:  "sat",
+		BandIndex: 3,
 	},
 	"metar_tmpc": {
 		Name:      "METAR Temperature (°C)",
