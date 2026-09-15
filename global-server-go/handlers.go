@@ -744,6 +744,12 @@ func generatePreviewRGBA(data []float32, band string, nodata *float64, width, he
 			if idx > 255 {
 				idx = 255
 			}
+			if idx == 0 {
+				// Min-clamped values render transparent — matches the tile
+			// renderer (dry radar echoes / sensor-fill pixels stay empty).
+				rgba[off], rgba[off+1], rgba[off+2], rgba[off+3] = 0, 0, 0, 0
+				continue
+			}
 			c := (*lut)[idx]
 			rgba[off], rgba[off+1], rgba[off+2], rgba[off+3] = c[0], c[1], c[2], 255
 		}

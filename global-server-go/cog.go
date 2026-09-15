@@ -127,6 +127,9 @@ func getCOGInfo(url string, bandIndex int) (*COGInfo, error) {
 	}
 
 	if bandIndex < 1 || bandIndex > ds.RasterCount() {
+		// Metadata (size/transform/bounds/overviews) is identical across
+		// raster bands — fall back to band 1 for out-of-range indices
+		// (e.g. radar_dbz on old 2-band v1 COGs).
 		bandIndex = 1
 	}
 
@@ -187,8 +190,18 @@ func readTile(url string, bandIndex, z, x, y, tileSize int) ([]float32, *float64
 	height := ds.Height()
 	gt := ds.GeoTransform()
 
+	// Initialize the full output buffer with NaN (transparent)
+	buf := make([]float32, tileSize*tileSize)
+	for i := range buf {
+		buf[i] = float32(math.NaN())
+	}
+
+	// Band not present in this file (e.g. radar_dbz = band 3 in old 2-band
+	// v1 sat COGs): serve a fully transparent tile instead of silently
+	// falling back to band 1 (which would render e.g. IR with the radar
+	// palette).
 	if bandIndex < 1 || bandIndex > ds.RasterCount() {
-		bandIndex = 1
+		return buf, nil, nil
 	}
 
 	// Get tile bounds in WGS84
@@ -206,12 +219,6 @@ func readTile(url string, bandIndex, z, x, y, tileSize int) ([]float32, *float64
 	fullYEnd := math.Ceil(math.Max(srcY1, srcY2))
 	fullW := fullXEnd - fullXOff
 	fullH := fullYEnd - fullYOff
-
-	// Initialize the full output buffer with NaN (transparent)
-	buf := make([]float32, tileSize*tileSize)
-	for i := range buf {
-		buf[i] = float32(math.NaN())
-	}
 
 	// Check if tile is entirely outside the raster
 	if fullXEnd <= 0 || fullYEnd <= 0 || fullXOff >= float64(width) || fullYOff >= float64(height) {
@@ -311,8 +318,15 @@ func readPreview(url string, bandIndex, targetW, targetH int) ([]float32, int, i
 	width := ds.Width()
 	height := ds.Height()
 
+	// Band not present in this file (e.g. radar_dbz = band 3 in old 2-band
+	// v1 sat COGs): serve a fully transparent preview instead of silently
+	// falling back to band 1.
 	if bandIndex < 1 || bandIndex > ds.RasterCount() {
-		bandIndex = 1
+		buf := make([]float32, targetW*targetH)
+		for i := range buf {
+			buf[i] = float32(math.NaN())
+		}
+		return buf, targetW, targetH, nil, nil
 	}
 
 	band := ds.Band(bandIndex)
@@ -363,7 +377,7 @@ func readPoint(url string, bandIndex int, lat, lon float64) (float64, error) {
 	}
 
 	if bandIndex < 1 || bandIndex > ds.RasterCount() {
-		bandIndex = 1
+		return 0, fmt.Errorf("band %d not present (dataset has %d bands)", bandIndex, ds.RasterCount())
 	}
 
 	gt := ds.GeoTransform()
