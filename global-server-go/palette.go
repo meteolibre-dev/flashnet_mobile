@@ -23,6 +23,29 @@ var irEnhancedLUT [256][3]byte
 var PrecomputedColormaps = map[string]*[256][4]byte{}
 
 func init() {
+	// Build the radar rain-rate LUT (log rain-rate axis), identical to
+	// lightning-server-go's RadarLUT: index i ↔ rate = exp(logMin +
+	// i/255·(logMax−logMin)); entries below the first class threshold stay
+	// transparent. buildRadarRainRGBA below resamples it over dBZ.
+	radarThresholds = make([]float64, len(RAIN_CLASSES))
+	for i, rc := range RAIN_CLASSES {
+		radarThresholds[i] = rc.Threshold
+	}
+	for i := 0; i < 256; i++ {
+		rate := math.Exp(radarLogMin + (float64(i)/255.0)*(radarLogMax-radarLogMin))
+		if rate < RAIN_CLASSES[0].Threshold {
+			continue // stays transparent
+		}
+		idx := searchSortedRight(radarThresholds, rate) - 1
+		if idx < 0 {
+			idx = 0
+		}
+		if idx >= len(radarThresholds) {
+			idx = len(radarThresholds) - 1
+		}
+		radarRateLUT[i] = [4]byte{RAIN_CLASSES[idx].RGB[0], RAIN_CLASSES[idx].RGB[1], RAIN_CLASSES[idx].RGB[2], 255}
+	}
+
 	// Build colormap LUTs for each band
 	for name, cfg := range BANDS {
 		var lut [256][4]byte
@@ -35,10 +58,11 @@ func init() {
 			// Satellite IR: two-segment stretch over the spectral→greys palette
 			// (see buildIREnhancedLUT).
 			lut = buildIREnhancedLUT(cfg.Min, cfg.Max, cfg.SplitValue, cfg.Invert)
-		case "radar_nws":
-			// Radar reflectivity: classic NWS dBZ palette (greens → yellow →
-			// orange → red → magenta → cyan) stretched over the band range.
-			lut = buildRadarReflectivityRGBA(cfg.Min, cfg.Max, cfg.Invert)
+		case "radar_rain":
+			// Radar reflectivity: the operational rain-rate colorbar from
+			// lightning-server-go (palette_radar_35.py), stretched over the
+			// band's dBZ range. See buildRadarRainRGBA.
+			lut = buildRadarRainRGBA(cfg.Min, cfg.Max, cfg.Invert)
 		case "greyscale":
 			// Plain greyscale (white → black); Invert flips the direction.
 			lut = buildGreyscaleLUT(cfg.Invert)
@@ -199,51 +223,94 @@ func buildIREnhancedLUT(min, max, split float64, invert bool) [256][4]byte {
 }
 
 // ---------------------------------------------------------------------------
-// Radar reflectivity palette (NWS-style)
+// Radar palette (rain-rate colorbar shared with lightning-server-go)
 // ---------------------------------------------------------------------------
 
-// dbzAnchor is one stop of a dBZ color ramp.
-type dbzAnchor struct {
-	dbz float64
-	rgb [3]byte
+// RainClass is one segment of the operational rain-rate palette from
+// palette_radar_35.py, as served by lightning-server-go.
+type RainClass struct {
+	Threshold float64 // lower bound of the segment (mm/h)
+	RGB       [3]byte
 }
 
-// nwsReflectivityAnchors are the classic NWS radar reflectivity colors
-// (greens → yellow → orange → red → magenta/purple → cyan at the extreme
-// end), as used on NOAA radar displays and distributed as Unidata's
-// "NWS Reflectivity" colormap.
-var nwsReflectivityAnchors = []dbzAnchor{
-	{5, [3]byte{4, 233, 4}},    // light green
-	{10, [3]byte{4, 170, 4}},   // green
-	{15, [3]byte{4, 119, 4}},   // dark green
-	{20, [3]byte{253, 246, 4}}, // yellow
-	{25, [3]byte{227, 195, 4}}, // dark yellow
-	{30, [3]byte{249, 165, 4}}, // light orange
-	{35, [3]byte{249, 115, 4}}, // orange
-	{40, [3]byte{249, 41, 4}},  // red
-	{45, [3]byte{192, 0, 0}},   // dark red
-	{50, [3]byte{255, 0, 255}}, // magenta
-	{55, [3]byte{167, 89, 194}}, // light purple
-	{60, [3]byte{115, 31, 165}}, // purple
-	{65, [3]byte{4, 213, 213}},  // cyan
-	{70, [3]byte{4, 104, 213}},  // blue
-	{75, [3]byte{85, 85, 255}},  // light blue
+// RAIN_CLASSES — 34 classes from palette_radar_35.py (thresholds 0.02 → 341.9 mm/h).
+// Kept byte-identical to lightning-server-go/palette.go so both tile
+// servers render the exact same radar colorbar.
+var RAIN_CLASSES = []RainClass{
+	{0.02, [3]byte{155, 190, 196}},
+	{0.04, [3]byte{102, 191, 199}},
+	{0.06, [3]byte{126, 225, 240}},
+	{0.09, [3]byte{98, 235, 253}},
+	{0.12, [3]byte{51, 170, 207}},
+	{0.16, [3]byte{19, 155, 228}},
+	{0.23, [3]byte{18, 117, 230}},
+	{0.32, [3]byte{8, 38, 225}},
+	{0.4, [3]byte{2, 254, 1}},
+	{0.6, [3]byte{3, 237, 1}},
+	{0.9, [3]byte{2, 221, 4}},
+	{1.1, [3]byte{1, 207, 0}},
+	{1.2, [3]byte{1, 192, 1}},
+	{1.6, [3]byte{1, 174, 2}},
+	{2.8, [3]byte{1, 160, 0}},
+	{3.2, [3]byte{0, 143, 2}},
+	{4.4, [3]byte{248, 239, 1}},
+	{6.1, [3]byte{239, 208, 0}},
+	{8.5, [3]byte{234, 180, 0}},
+	{10.0, [3]byte{241, 148, 2}},
+	{12.9, [3]byte{253, 114, 2}},
+	{18.0, [3]byte{252, 80, 1}},
+	{22.3, [3]byte{252, 41, 2}},
+	{30.2, [3]byte{251, 1, 1}},
+	{39.2, [3]byte{238, 1, 0}},
+	{50.1, [3]byte{210, 1, 4}},
+	{63.6, [3]byte{196, 0, 0}},
+	{80.7, [3]byte{172, 0, 0}},
+	{102.5, [3]byte{251, 201, 252}},
+	{130.1, [3]byte{229, 162, 230}},
+	{166.2, [3]byte{202, 124, 198}},
+	{211.4, [3]byte{178, 87, 180}},
+	{268.8, [3]byte{151, 45, 152}},
+	{341.9, [3]byte{255, 185, 255}},
 }
 
-// buildRadarReflectivityRGBA stretches the NWS reflectivity anchors
-// piecewise-linearly over [min, max] dBZ into a 256-entry RGBA LUT.
-// Transparency (NaN no-coverage, dry echoes below the band Min) is handled
-// by the renderers' nodata / min-clamp logic, not by this LUT.
-func buildRadarReflectivityRGBA(min, max float64, invert bool) [256][4]byte {
+// Radar log-mapping constants (mirrors lightning-server-go/palette.go).
+var (
+	radarMaxRate    = float64(RAIN_CLASSES[len(RAIN_CLASSES)-1].Threshold)
+	radarLogMin     = math.Log(0.005)
+	radarLogMax     = math.Log(radarMaxRate)
+	radarThresholds []float64
+)
+
+// radarRateLUT is a 256-entry RGBA LUT over the log rain-rate axis —
+// identical to lightning-server-go's RadarLUT. It is an intermediate:
+// buildRadarRainRGBA resamples it over the band's dBZ range.
+var radarRateLUT [256][4]byte
+
+// buildRadarRainRGBA stretches the lightning-server rain-rate colorbar over
+// the band's dBZ range [min, max]: each LUT index ↔ dBZ → rain rate via the
+// Marshall-Palmer Z-R relation → RAIN_CLASSES color (log-mapped). This is
+// exactly lightning-server-go's per-pixel renderRadarTile math, evaluated
+// once per LUT entry; since log(rain rate) is affine in dBZ under the Z-R
+// relation, the log stretch is preserved by the linear dBZ resampling.
+//
+// Entries whose rate falls below the first class threshold get the first
+// class color (the generic renderer forces alpha=255, so a transparent LUT
+// entry would render black); with the default Min=5 dBZ every in-range
+// value maps above the first threshold anyway.
+func buildRadarRainRGBA(min, max float64, invert bool) [256][4]byte {
 	if max <= min {
 		max = min + 1
 	}
 
+	first := RAIN_CLASSES[0].RGB
 	var lut [256][4]byte
 	for i := 0; i < 256; i++ {
-		v := min + float64(i)/255.0*(max-min)
-		c := interpolateDBZ(v)
-		lut[i] = [4]byte{c[0], c[1], c[2], 255}
+		dbz := min + float64(i)/255.0*(max-min)
+		c := radarRateLUT[radarRateIndex(dbzToMmh(dbz))]
+		if c[3] == 0 {
+			c = [4]byte{first[0], first[1], first[2], 255}
+		}
+		lut[i] = c
 	}
 
 	if invert {
@@ -254,27 +321,50 @@ func buildRadarReflectivityRGBA(min, max float64, invert bool) [256][4]byte {
 	return lut
 }
 
-// interpolateDBZ piecewise-linearly interpolates nwsReflectivityAnchors at
-// dBZ value v (clamped to the anchor range).
-func interpolateDBZ(v float64) [3]byte {
-	anchors := nwsReflectivityAnchors
-	if v <= anchors[0].dbz {
-		return anchors[0].rgb
+// radarRateIndex maps a rain rate (mm/h) to a radarRateLUT index, using the
+// same clamps and log normalization as lightning-server-go's renderer.
+func radarRateIndex(rate float64) int {
+	if rate < 0.01 {
+		rate = 0.01
 	}
-	last := anchors[len(anchors)-1]
-	if v >= last.dbz {
-		return last.rgb
+	if rate > radarMaxRate {
+		rate = radarMaxRate
 	}
-	for j := 1; j < len(anchors); j++ {
-		a, b := anchors[j-1], anchors[j]
-		if v <= b.dbz {
-			f := (v - a.dbz) / (b.dbz - a.dbz)
-			return [3]byte{
-				byte(float64(a.rgb[0]) + f*float64(int(b.rgb[0])-int(a.rgb[0]))),
-				byte(float64(a.rgb[1]) + f*float64(int(b.rgb[1])-int(a.rgb[1]))),
-				byte(float64(a.rgb[2]) + f*float64(int(b.rgb[2])-int(a.rgb[2]))),
-			}
+	norm := (math.Log(rate) - radarLogMin) / (radarLogMax - radarLogMin)
+	if norm < 0 {
+		norm = 0
+	}
+	if norm > 1 {
+		norm = 1
+	}
+	idx := int(norm * 255)
+	if idx < 1 {
+		idx = 0
+	}
+	return idx
+}
+
+// searchSortedRight returns the index where `value` would be inserted to keep
+// the slice sorted (right side), matching numpy.searchsorted(side='right').
+func searchSortedRight(sorted []float64, value float64) int {
+	lo, hi := 0, len(sorted)
+	for lo < hi {
+		mid := (lo + hi) / 2
+		if value >= sorted[mid] {
+			lo = mid + 1
+		} else {
+			hi = mid
 		}
 	}
-	return last.rgb
+	return lo
+}
+
+// dbzToMmh converts radar reflectivity (dBZ) to rain rate (mm/h) via the
+// Marshall-Palmer Z-R relationship: Z = 200·R^1.6 → R = (Z/200)^(1/1.6).
+func dbzToMmh(dbz float64) float64 {
+	if dbz <= 0 {
+		return 0
+	}
+	z := math.Pow(10.0, dbz/10.0)
+	return math.Pow(z/200.0, 1.0/1.6)
 }

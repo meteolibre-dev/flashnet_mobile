@@ -116,7 +116,7 @@ var BANDS = map[string]*BandConfig{
 		Name:       "Radar Reflectivity Forecast (dBZ)",
 		Min:        5,
 		Max:        65,
-		Colormap:   "radar_nws",
+		Colormap:   "radar_rain",
 		Invert:     false,
 		DType:      "float32",
 		FileBand:   "sat",
