@@ -10,6 +10,10 @@ services:
       - BUCKET_BASE_URL=gs://inference_result_flashedges_forecast/forecasts
       - GOMAXPROCS=4
       - GDAL_CACHEMAX=500
+      # METAR station list (primary: preprocessing pq, fallback: AWC):
+      # - METAR_PQ_BUCKET=gs://eumetsat_mtg_preprocess
+      # - METAR_PQ_PREFIX=inference_h5_global
+      # - AIRPORTS_REFRESH_MINUTES=30
       # Optional band range overrides (defaults: IR/sat_ch0 0–250, VIS/sat_ch1 -35–250):
       # - BAND_SAT_CH0_MIN=0
       # - BAND_SAT_CH0_MAX=250

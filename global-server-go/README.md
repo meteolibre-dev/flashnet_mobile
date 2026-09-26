@@ -95,9 +95,11 @@ Requires Go 1.22+ and `libgdal-dev` (cgo).
 | `BAND_<NAME>_NODATA_COLOR` | per band | No-data (NaN) color, `#RRGGBB[AA]`; empty = transparent. Default set only for `radar_dbz` |
 | `GCS_ANONYMOUS` | — | Force unauthenticated GCS access |
 | `GCP_CREDENTIALS_B64` | — | Base64 service account JSON (Cloud Run) |
-| `AIRPORTS_AWC_URL` | AWC bulk cache URL | Source for the live station list |
+| `AIRPORTS_AWC_URL` | AWC bulk cache URL | Fallback source for the live station list |
 | `AIRPORTS_REFRESH_MINUTES` | `30` | /airports background refresh interval |
-| `AIRPORTS_MAX_REPORT_AGE` | `3h` | Max report age for a station to be listed |
+| `AIRPORTS_MAX_REPORT_AGE` | `3h` | Max report age for a station to be listed (AWC fallback) |
+| `METAR_PQ_BUCKET` | `gs://eumetsat_mtg_preprocess` | Bucket holding the `global_live_*.pq` snapshots |
+| `METAR_PQ_PREFIX` | `inference_h5_global` | Prefix of the `global_live_*.pq` snapshots |
 
 ## API Endpoints
 
@@ -110,7 +112,7 @@ Same surface as lightning-server-go:
 | `GET /bands` | Band configs (incl. raster band index) |
 | `GET /times` | Generated hourly timestamps |
 | `GET /available` | Latest run + its timesteps |
-| `GET /airports` | METAR stations with a recent report (live AWC snapshot, gzip+ETag) |
+| `GET /airports` | METAR stations present in the live dataset (pq snapshot, gzip+ETag) |
 | `GET /history/dates` | Dates with data |
 | `GET /history/dates/{YYYY-MM-DD}` | Runs valid on a date |
 | `GET /tiles/{z}/{x}/{y}.png` | XYZ tile (PNG) |
@@ -136,20 +138,28 @@ GET /point?lat=48.86&lon=2.35&band=radar_dbz&steps=all
 
 ### METAR airports
 
-`GET /airports` returns only the stations that **actually reported METAR
-recently** (previous-hour snapshot, ~5k stations) instead of the full AWC
-station registry (~7.7k):
+`GET /airports` returns only the stations that **actually have data in the
+live dataset** (~5k stations), so users can only pick points with a real
+forecast behind them:
 
-- The server fetches AWC's bulk metar cache (same source as the dataset
-  generator's `fetch_latest_global`) every `AIRPORTS_REFRESH_MINUTES` (30) in
-  the background, keeps METAR/SPECI reports not older than
-  `AIRPORTS_MAX_REPORT_AGE` (3h), and joins station names/countries from the
-  embedded registry `data/airports.json` (regenerate with
-  `python3 scripts/fetch_airports.py`).
+- Primary source is the preprocessing pipeline's hourly parquet snapshot
+  `gs://eumetsat_mtg_preprocess/inference_h5_global/global_live_<YYYYMMDD_HH00>.pq`
+  (configure with `METAR_PQ_BUCKET` / `METAR_PQ_PREFIX`) — the exact station
+  set that fed the live metar COGs. The newest `.pq` is picked on every
+  `AIRPORTS_REFRESH_MINUTES` (30) background refresh; `lat`/`lon` come from
+  the parquet rows (newest observation wins per station), names/countries
+  from the embedded registry `data/airports.json` (regenerate with
+  `python3 scripts/fetch_airports.py`). Stations with junk coordinates
+  (the `-99.99` sentinel) fall back to registry coordinates.
+- Fallback when the bucket is unreachable: AWC's bulk metar cache
+  (`AIRPORTS_AWC_URL`, same source as the dataset generator's
+  `fetch_latest_global`, reports ≤ `AIRPORTS_MAX_REPORT_AGE` old).
 - Responses are pre-rendered per refresh: gzip + per-snapshot ETag + 15 min
   browser cache. `X-Airports-Live: true|false` tells whether the payload is
-  the live snapshot or the registry fallback (used until the first
-  successful fetch; stale list is kept if AWC is unreachable).
+  a live snapshot or the registry fallback (served until the first
+  successful fetch; stale list is kept while sources are unreachable),
+  `X-Airports-Source` names the winning source and `X-Airports-Data-Time`
+  the pq run hour. The JSON payload also carries `source` and `data_time`.
 
 ## Deployment
 

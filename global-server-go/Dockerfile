@@ -2,7 +2,7 @@
 # Uses GDAL via cgo for Cloud Optimized GeoTIFF reading.
 
 # ── Build stage ──────────────────────────────────────────────────────────────
-FROM golang:1.22-bookworm AS builder
+FROM golang:1.24-bookworm AS builder
 
 # Install GDAL development libraries (required for cgo)
 RUN apt-get update && apt-get install -y --no-install-recommends \
