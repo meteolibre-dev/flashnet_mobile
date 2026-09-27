@@ -100,6 +100,7 @@ Requires Go 1.22+ and `libgdal-dev` (cgo).
 | `AIRPORTS_MAX_REPORT_AGE` | `3h` | Max report age for a station to be listed (AWC fallback) |
 | `METAR_PQ_BUCKET` | `gs://eumetsat_mtg_preprocess` | Bucket holding the `global_live_*.pq` snapshots |
 | `METAR_PQ_PREFIX` | `inference_h5_global` | Prefix of the `global_live_*.pq` snapshots |
+| `METAR_PQ_MAX_AGE` | `6h` | Max age of the newest pq before falling back to AWC (`0` disables) |
 
 ## API Endpoints
 

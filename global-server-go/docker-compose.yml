@@ -13,6 +13,7 @@ services:
       # METAR station list (primary: preprocessing pq, fallback: AWC):
       # - METAR_PQ_BUCKET=gs://eumetsat_mtg_preprocess
       # - METAR_PQ_PREFIX=inference_h5_global
+      # - METAR_PQ_MAX_AGE=6h
       # - AIRPORTS_REFRESH_MINUTES=30
       # Optional band range overrides (defaults: IR/sat_ch0 0–250, VIS/sat_ch1 -35–250):
       # - BAND_SAT_CH0_MIN=0
