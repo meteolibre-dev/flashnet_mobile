@@ -10,7 +10,11 @@ package main
 // model run (10-min cadence). When a timestamp exists in both (a forecast
 // frame that has aged into the past), the observation wins — exactly what
 // the tile resolver (obs.go) serves, so the timeline and the tiles never
-// disagree.
+// disagree. This includes frames older than the requested obs window: the
+// latest run always starts in the past, and a run frame before the window
+// would otherwise stay labelled "forecast" while resolveCOG actually serves
+// its observation (the app painted a red "AI forecast" sliver at the start
+// of the ruler for observed data).
 // ============================================================================
 
 import (
@@ -30,6 +34,22 @@ type TimelineResponse struct {
 	LatestObsDatetime string          `json:"latest_obs_datetime,omitempty"`
 }
 
+// obsEntryFor builds the timeline entry for one observed frame.
+func obsEntryFor(ts string) (TimestampInfo, error) {
+	dt, err := parseTimestamp(ts)
+	if err != nil {
+		return TimestampInfo{}, err
+	}
+	return TimestampInfo{
+		Timestamp:      ts,
+		Datetime:       dt.UTC().Format("2006-01-02T15:04:05Z"),
+		AvailableBands: []string{"radar"}, // observations exist only for radar
+		Kind:           "obs",
+		TiffURL: fmt.Sprintf("https://storage.googleapis.com/%s/%s",
+			getBucketName(), obsBlobPath(ts)),
+	}, nil
+}
+
 // obsEntries returns timeline entries for observed frames newer than
 // now-obsHours, read from the in-memory manifest index (no GCS calls).
 func obsEntries(obsHours int, now time.Time) []TimestampInfo {
@@ -43,18 +63,11 @@ func obsEntries(obsHours int, now time.Time) []TimestampInfo {
 		if ts < cutoff {
 			continue
 		}
-		dt, err := parseTimestamp(ts)
+		e, err := obsEntryFor(ts)
 		if err != nil {
 			continue
 		}
-		out = append(out, TimestampInfo{
-			Timestamp:      ts,
-			Datetime:       dt.UTC().Format("2006-01-02T15:04:05Z"),
-			AvailableBands: []string{"radar"}, // observations exist only for radar
-			Kind:           "obs",
-			TiffURL: fmt.Sprintf("https://storage.googleapis.com/%s/%s",
-				getBucketName(), obsBlobPath(ts)),
-		})
+		out = append(out, e)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Timestamp < out[j].Timestamp })
 	return out
@@ -63,17 +76,31 @@ func obsEntries(obsHours int, now time.Time) []TimestampInfo {
 // mergeTimeline merges observed and forecast entries chronologically.
 // Observations win on timestamp collisions (truth over prediction —
 // consistent with resolveCOG).
-func mergeTimeline(obs, fcst []TimestampInfo) []TimestampInfo {
+//
+// Run frames that have aged into the past are swapped for their observation
+// whenever one exists in the index — even when it sits before the requested
+// obs window. resolveCOG serves obs for any live-view timestamp in the
+// index with no window cutoff, so the timeline must label those frames as
+// obs too, or the app shows observed tiles under a red "AI forecast" label.
+func mergeTimeline(obs, fcst []TimestampInfo, now time.Time) []TimestampInfo {
 	obsSet := make(map[string]bool, len(obs))
 	for _, e := range obs {
 		obsSet[e.Timestamp] = true
 	}
+	nowTs := now.UTC().Format("200601021504") // "YYYYMMDDHHMM" sorts chronologically
 
 	merged := make([]TimestampInfo, 0, len(obs)+len(fcst))
 	merged = append(merged, obs...)
 	for _, e := range fcst {
 		if obsSet[e.Timestamp] {
 			continue // obs already covers this timestamp
+		}
+		if e.Timestamp <= nowTs && obsAvailable(e.Timestamp) {
+			// Aged run frame with no in-window obs entry: swap in the truth.
+			if oe, err := obsEntryFor(e.Timestamp); err == nil {
+				merged = append(merged, oe)
+				continue
+			}
 		}
 		merged = append(merged, e)
 	}
@@ -95,7 +122,7 @@ func buildTimeline(ctx context.Context, days, obsHours int) (*TimelineResponse, 
 	}
 
 	obs := obsEntries(obsHours, time.Now().UTC())
-	merged := mergeTimeline(obs, fcstEntries)
+	merged := mergeTimeline(obs, fcstEntries, time.Now().UTC())
 
 	resp := &TimelineResponse{
 		Timestamps: merged,
