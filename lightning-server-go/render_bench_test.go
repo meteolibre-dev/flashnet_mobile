@@ -46,10 +46,11 @@ func BenchmarkRenderRadar(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		rgba := generateTileRGBA(data, "radar", &nd, benchTileSize)
-		if rgba == nil {
-			b.Fatal("nil rgba")
+		tb := renderTile(data, "radar", &nd, benchTileSize)
+		if tb == nil {
+			b.Fatal("nil tb")
 		}
+		releaseTileBuffers(tb)
 	}
 }
 
@@ -58,10 +59,11 @@ func BenchmarkRenderLightning(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		rgba := generateTileRGBA(data, "lightning", nil, benchTileSize)
-		if rgba == nil {
-			b.Fatal("nil rgba")
+		tb := renderTile(data, "lightning", nil, benchTileSize)
+		if tb == nil {
+			b.Fatal("nil tb")
 		}
+		releaseTileBuffers(tb)
 	}
 }
 
@@ -72,10 +74,11 @@ func BenchmarkRenderSatellite(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		rgba := generateTileRGBA(data, "sat_ch1", &nd, benchTileSize)
-		if rgba == nil {
-			b.Fatal("nil rgba")
+		tb := renderTile(data, "sat_ch1", &nd, benchTileSize)
+		if tb == nil {
+			b.Fatal("nil tb")
 		}
+		releaseTileBuffers(tb)
 	}
 }
 
@@ -84,11 +87,12 @@ func BenchmarkRenderSatellite(b *testing.B) {
 func BenchmarkEncodePNG(b *testing.B) {
 	data := makeBenchTile(benchTileSize*benchTileSize, 1, 5, 65, 0.25, 0.30)
 	var nd float64 = -9999
-	rgba := generateTileRGBA(data, "radar", &nd, benchTileSize)
+	tb := renderTile(data, "radar", &nd, benchTileSize)
+	defer releaseTileBuffers(tb)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := encodePNG(rgba[:benchTileSize*benchTileSize*4], benchTileSize, benchTileSize); err != nil {
+		if _, err := encodePNG(tb.rgba[:benchTileSize*benchTileSize*4], benchTileSize, benchTileSize); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -124,9 +128,10 @@ func BenchmarkPipelineLightning(b *testing.B) {
 func BenchmarkETagMD5(b *testing.B) {
 	data := makeBenchTile(benchTileSize*benchTileSize, 1, 5, 65, 0.25, 0.30)
 	var nd float64 = -9999
-	rgba := generateTileRGBA(data, "radar", &nd, benchTileSize)
+	tb := renderTile(data, "radar", &nd, benchTileSize)
+	defer releaseTileBuffers(tb)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = md5.Sum(rgba[:256*256*4])
+		_ = md5.Sum(tb.rgba[:256*256*4])
 	}
 }

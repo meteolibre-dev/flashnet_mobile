@@ -2,6 +2,14 @@ package main
 
 // ============================================================================
 // render.go — Colormap application and PNG tile generation
+// ----------------------------------------------------------------------------
+// Performance notes (perf/render-optimizations branch):
+//   - Tile buffers (RGBA, nodata mask) are recycled through a sync.Pool
+//     instead of being allocated per tile.
+//   - The radar path uses a precomputed dBZ→color LUT (see palette.go)
+//     instead of per-pixel math.Pow/math.Log, fused into a single pass.
+//   - PNG encoding wraps the RGBA slice in an image.NRGBA view (no 256 KB
+//     copy) and uses BestSpeed compression (env TILE_PNG_COMPRESSION).
 // ============================================================================
 
 import (
@@ -9,92 +17,126 @@ import (
 	"image"
 	"image/png"
 	"math"
+	"sync"
 )
 
-// generateTileRGBA applies the band's colormap to a float32 tile buffer,
-// returning a 256×256 RGBA byte slice. This mirrors generate_tile_rgba()
-// in the Python server.
-//
-// Parameters:
-//   - data: float32 array of tileSize×tileSize values
-//   - band: band name (determines colormap)
-//   - nodata: pointer to nodata value (nil if none)
-//   - tileSize: typically 256
-func generateTileRGBA(data []float32, band string, nodata *float64, tileSize int) *[256 * 256 * 4]byte {
-	cfg, ok := BANDS[band]
-	if !ok {
+// ---------------------------------------------------------------------------
+// Buffer pool
+// ---------------------------------------------------------------------------
+
+// tileBuffers holds the scratch buffers for one 256×256 tile render.
+type tileBuffers struct {
+	rgba  []byte   // tileSize×tileSize×4
+	mask  []bool   // tileSize×tileSize nodata mask
+	pooled bool    // true if owned by the pool (must be returned)
+}
+
+const tileRGBASize = 256 * 256 * 4
+
+var tileBufPool = sync.Pool{
+	New: func() interface{} {
+		return &tileBuffers{
+			rgba: make([]byte, tileRGBASize),
+			mask: make([]bool, 256*256),
+		}
+	},
+}
+
+// getTileBuffers returns scratch buffers for a tileSize×tileSize render.
+// Only the canonical 256×256 size is pooled; other sizes allocate fresh
+// (preview path uses its own buffers).
+func getTileBuffers(tileSize int) *tileBuffers {
+	if tileSize*tileSize*4 == tileRGBASize {
+		tb := tileBufPool.Get().(*tileBuffers)
+		tb.pooled = true
+		return tb
+	}
+	return &tileBuffers{
+		rgba: make([]byte, tileSize*tileSize*4),
+		mask: make([]bool, tileSize*tileSize),
+	}
+}
+
+// releaseTileBuffers returns buffers to the pool. Call when done with tb.rgba.
+func releaseTileBuffers(tb *tileBuffers) {
+	if tb != nil && tb.pooled {
+		tb.pooled = false
+		tileBufPool.Put(tb)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Tile rendering
+// ---------------------------------------------------------------------------
+
+// renderTile applies the band's colormap to a float32 tile buffer, rendering
+// into pooled scratch memory. The result is valid until releaseTileBuffers is
+// called. Returns nil for an unknown band.
+func renderTile(data []float32, band string, nodata *float64, tileSize int) *tileBuffers {
+	if _, ok := BANDS[band]; !ok {
 		return nil
 	}
 
-	rgba := make([]byte, tileSize*tileSize*4)
-
-	// Build nodata mask
-	nodataMask := make([]bool, tileSize*tileSize)
-	if nodata != nil {
-		nd := float32(*nodata)
-		for i, v := range data {
-			nodataMask[i] = v == nd || !isFinite32(v)
-		}
-	} else {
-		for i, v := range data {
-			nodataMask[i] = !isFinite32(v)
-		}
-	}
+	tb := getTileBuffers(tileSize)
 
 	switch band {
 	case "radar":
-		renderRadarTile(data, rgba, nodataMask, tileSize)
+		// Single fused pass: transparent check + dBZ LUT lookup.
+		renderRadarTileLUT(data, tb.rgba, nodata, tileSize)
 	case "lightning":
-		renderLightningTile(data, rgba, nodataMask, cfg, tileSize)
+		buildNodataMask(data, tb.mask, nodata)
+		renderLightningTile(data, tb.rgba, tb.mask, BANDS[band], tileSize)
 	default:
-		renderGenericTile(data, rgba, nodataMask, cfg, tileSize)
+		buildNodataMask(data, tb.mask, nodata)
+		renderGenericTile(data, tb.rgba, tb.mask, BANDS[band], tileSize)
 	}
 
-	// Convert to fixed-size array
-	var result [256 * 256 * 4]byte
-	copy(result[:], rgba[:256*256*4])
-	return &result
+	return tb
 }
 
-// renderRadarTile applies the Z-R transform and radar palette LUT.
-func renderRadarTile(data []float32, rgba []byte, nodataMask []bool, tileSize int) {
-	logRate := make([]float32, len(data))
-	for i, dbz := range data {
-		if dbz > 0 {
-			z := float32(math.Pow(10.0, float64(dbz)/10.0))
-			rainRate := float32(math.Pow(float64(z)/200.0, 1.0/1.6))
-			if rainRate < 0.01 {
-				rainRate = 0.01
-			}
-			if rainRate > float32(radarMaxRate) {
-				rainRate = float32(radarMaxRate)
-			}
-			logRate[i] = float32(math.Log(float64(rainRate)))
-		} else {
-			logRate[i] = 0
-			nodataMask[i] = true // zero rain = transparent
+// buildNodataMask fills mask[i] = (data[i]==nodata) || !isFinite(data[i]).
+// Uses pure float32 comparisons — no float64 round-trips.
+func buildNodataMask(data []float32, mask []bool, nodata *float64) {
+	const fmax = math.MaxFloat32 / 2 // excludes ±Inf and NaN
+	if nodata != nil {
+		nd := float32(*nodata)
+		for i, v := range data {
+			mask[i] = v == nd || !(v >= -fmax && v <= fmax)
+		}
+	} else {
+		for i, v := range data {
+			mask[i] = !(v >= -fmax && v <= fmax)
 		}
 	}
+}
 
-	for i := 0; i < len(logRate); i++ {
+// renderRadarTileLUT applies the Z-R transform via the precomputed dBZ→color
+// LUT (dbzColorLUT in palette.go). Semantics match the original two-pass
+// implementation: a pixel is transparent when it is nodata, non-finite,
+// or ≤ 0 dBZ (zero rain = transparent).
+func renderRadarTileLUT(data []float32, rgba []byte, nodata *float64, tileSize int) {
+	maxIdx := len(dbzColorLUT) - 1
+	const fmax = math.MaxFloat32 / 2
+
+	hasNd := nodata != nil
+	nd := float32(0)
+	if hasNd {
+		nd = float32(*nodata)
+	}
+
+	for i, v := range data {
 		off := i * 4
-		if nodataMask[i] || data[i] <= 0 {
+		// Transparent: nodata, NaN/Inf, or non-positive reflectivity.
+		// (NaN fails every comparison, so it lands here — same as before.)
+		if (hasNd && v == nd) || !(v >= -fmax && v <= fmax) || v <= 0 {
 			rgba[off], rgba[off+1], rgba[off+2], rgba[off+3] = 0, 0, 0, 0
 			continue
 		}
-		// Normalize using logarithmic mapping
-		dataNorm := (logRate[i] - float32(radarLogMin)) / float32(radarLogMax-radarLogMin)
-		if dataNorm < 0 {
-			dataNorm = 0
+		ci := int(v*dbzLutScale + 0.5)
+		if ci > maxIdx {
+			ci = maxIdx // dBZ ≥ 100 dB clamps to max rain rate color
 		}
-		if dataNorm > 1 {
-			dataNorm = 1
-		}
-		idx := int(dataNorm * 255)
-		if idx < 1 {
-			idx = 0 // index 0 = transparent
-		}
-		c := RadarLUT[idx]
+		c := dbzColorLUT[ci]
 		rgba[off] = c[0]
 		rgba[off+1] = c[1]
 		rgba[off+2] = c[2]
@@ -221,40 +263,70 @@ func renderGenericTile(data []float32, rgba []byte, nodataMask []bool, cfg *Band
 // PNG encoding
 // ---------------------------------------------------------------------------
 
+// pngEncoder is the shared encoder instance. Weather tiles are mostly flat
+// regions, so BestSpeed compression trades a few % of file size for a large
+// encode speedup. Override with TILE_PNG_COMPRESSION=speed|default|best|none.
+var pngEncoder = &png.Encoder{CompressionLevel: png.BestSpeed}
+
+func init() {
+	switch envOr("TILE_PNG_COMPRESSION", "speed") {
+	case "default":
+		pngEncoder.CompressionLevel = png.DefaultCompression
+	case "best":
+		pngEncoder.CompressionLevel = png.BestCompression
+	case "none":
+		pngEncoder.CompressionLevel = png.NoCompression
+	default: // "speed"
+		pngEncoder.CompressionLevel = png.BestSpeed
+	}
+}
+
 // encodePNG encodes a raw straight-alpha RGBA byte slice into PNG bytes.
 //
-// IMPORTANT: uses image.NRGBA (non-premultiplied alpha), NOT image.RGBA.
-// image.RGBA stores alpha-premultiplied pixels, so if we wrote straight-alpha
-// values into it, the PNG encoder would "un-premultiply" them (dividing R,G,B
-// by A/255), corrupting all semi-transparent pixels — e.g. yellow (255,255,0)
-// with alpha=210 would become (54,243,0) = green. NRGBA stores straight
-// alpha and the PNG encoder writes it correctly.
+// IMPORTANT: the pixel data uses straight (non-premultiplied) alpha, so we
+// wrap it in an image.NRGBA view. image.RGBA would treat it as premultiplied
+// and "un-premultiply" on read, corrupting semi-transparent pixels — e.g.
+// yellow (255,255,0) with alpha=210 would become (54,243,0) = green.
+//
+// The rgba slice is only read during encoding (no copy is made); the caller
+// may recycle it once encodePNG returns.
 func encodePNG(rgba []byte, width, height int) ([]byte, error) {
-	img := image.NewNRGBA(image.Rect(0, 0, width, height))
-	copy(img.Pix, rgba)
-
+	img := &image.NRGBA{
+		Pix:    rgba,
+		Stride: width * 4,
+		Rect:   image.Rect(0, 0, width, height),
+	}
 	var buf bytes.Buffer
-	if err := png.Encode(&buf, img); err != nil {
+	if err := pngEncoder.Encode(&buf, img); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
 }
 
-// encodeEmptyPNG returns a fully transparent PNG tile.
+var (
+	emptyPNGOnce sync.Once
+	emptyPNGData []byte
+)
+
+// encodeEmptyPNG returns a fully transparent PNG tile (computed once).
 func encodeEmptyPNG(size int) []byte {
-	img := image.NewRGBA(image.Rect(0, 0, size, size))
-	var buf bytes.Buffer
-	_ = png.Encode(&buf, img)
-	return buf.Bytes()
+	emptyPNGOnce.Do(func() {
+		img := image.NewNRGBA(image.Rect(0, 0, size, size))
+		var buf bytes.Buffer
+		_ = pngEncoder.Encode(&buf, img)
+		emptyPNGData = buf.Bytes()
+	})
+	return emptyPNGData
 }
 
 // renderAndEncodeTile takes raw float32 data and returns encoded PNG bytes.
 func renderAndEncodeTile(data []float32, band string, nodata *float64, tileSize int) ([]byte, error) {
-	rgba := generateTileRGBA(data, band, nodata, tileSize)
-	if rgba == nil {
+	tb := renderTile(data, band, nodata, tileSize)
+	if tb == nil {
 		return encodeEmptyPNG(tileSize), nil
 	}
-	return encodePNG(rgba[:tileSize*tileSize*4], tileSize, tileSize)
+	defer releaseTileBuffers(tb)
+	return encodePNG(tb.rgba[:tileSize*tileSize*4], tileSize, tileSize)
 }
 
 // ---------------------------------------------------------------------------
@@ -264,5 +336,3 @@ func renderAndEncodeTile(data []float32, band string, nodata *float64, tileSize 
 func isFinite32(v float32) bool {
 	return !math.IsNaN(float64(v)) && !math.IsInf(float64(v), 0)
 }
-
-

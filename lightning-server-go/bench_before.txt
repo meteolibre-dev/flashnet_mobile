@@ -1,0 +1,41 @@
+goos: linux
+goarch: amd64
+pkg: lightning-server-go
+cpu: Intel(R) Core(TM) i7-9700K CPU @ 3.60GHz
+BenchmarkRenderRadar-8         	     218	   5485991 ns/op	  851968 B/op	       4 allocs/op
+BenchmarkRenderRadar-8         	     217	   5466845 ns/op	  851968 B/op	       4 allocs/op
+BenchmarkRenderRadar-8         	     219	   5469165 ns/op	  851968 B/op	       4 allocs/op
+BenchmarkRenderRadar-8         	     219	   5485533 ns/op	  851968 B/op	       4 allocs/op
+BenchmarkRenderRadar-8         	     217	   5441986 ns/op	  851968 B/op	       4 allocs/op
+BenchmarkRenderLightning-8     	     807	   2129087 ns/op	  589824 B/op	       3 allocs/op
+BenchmarkRenderLightning-8     	     594	   1795696 ns/op	  589824 B/op	       3 allocs/op
+BenchmarkRenderLightning-8     	     562	   2485988 ns/op	  589824 B/op	       3 allocs/op
+BenchmarkRenderLightning-8     	     519	   2221447 ns/op	  589824 B/op	       3 allocs/op
+BenchmarkRenderLightning-8     	     537	   2199526 ns/op	  589824 B/op	       3 allocs/op
+BenchmarkRenderSatellite-8     	     747	   2318585 ns/op	  589824 B/op	       3 allocs/op
+BenchmarkRenderSatellite-8     	     666	   2229073 ns/op	  589824 B/op	       3 allocs/op
+BenchmarkRenderSatellite-8     	     852	   2679009 ns/op	  589824 B/op	       3 allocs/op
+BenchmarkRenderSatellite-8     	     944	   2063170 ns/op	  589824 B/op	       3 allocs/op
+BenchmarkRenderSatellite-8     	     439	   2734674 ns/op	  589824 B/op	       3 allocs/op
+BenchmarkEncodePNG-8           	      63	  18723516 ns/op	 1240064 B/op	      35 allocs/op
+BenchmarkEncodePNG-8           	      63	  18520031 ns/op	 1240064 B/op	      35 allocs/op
+BenchmarkEncodePNG-8           	      66	  18427397 ns/op	 1240064 B/op	      35 allocs/op
+BenchmarkEncodePNG-8           	      63	  18485978 ns/op	 1240065 B/op	      35 allocs/op
+BenchmarkEncodePNG-8           	      63	  18670240 ns/op	 1240064 B/op	      35 allocs/op
+BenchmarkPipelineRadar-8       	      50	  23871250 ns/op	 2092038 B/op	      39 allocs/op
+BenchmarkPipelineRadar-8       	      51	  23772068 ns/op	 2092040 B/op	      39 allocs/op
+BenchmarkPipelineRadar-8       	      52	  23968911 ns/op	 2092038 B/op	      39 allocs/op
+BenchmarkPipelineRadar-8       	      52	  23841578 ns/op	 2092039 B/op	      39 allocs/op
+BenchmarkPipelineRadar-8       	      52	  23933339 ns/op	 2092037 B/op	      39 allocs/op
+BenchmarkPipelineLightning-8   	      57	  20852830 ns/op	 1739780 B/op	      37 allocs/op
+BenchmarkPipelineLightning-8   	      60	  20829924 ns/op	 1739781 B/op	      37 allocs/op
+BenchmarkPipelineLightning-8   	      57	  20946608 ns/op	 1739781 B/op	      37 allocs/op
+BenchmarkPipelineLightning-8   	      60	  20886454 ns/op	 1739781 B/op	      37 allocs/op
+BenchmarkPipelineLightning-8   	      58	  20848391 ns/op	 1739782 B/op	      37 allocs/op
+BenchmarkETagMD5-8             	    4449	    262894 ns/op	       0 B/op	       0 allocs/op
+BenchmarkETagMD5-8             	    4537	    264245 ns/op	       0 B/op	       0 allocs/op
+BenchmarkETagMD5-8             	    4576	    263755 ns/op	       0 B/op	       0 allocs/op
+BenchmarkETagMD5-8             	    4638	    263160 ns/op	       0 B/op	       0 allocs/op
+BenchmarkETagMD5-8             	    4516	    263601 ns/op	       0 B/op	       0 allocs/op
+PASS
+ok  	lightning-server-go	60.124s

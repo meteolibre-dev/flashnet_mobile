@@ -74,14 +74,14 @@ def tile_url(base, z, x, y, band, ts, run_time):
         u += f"&run_time={run_time}"
     return u
 
-def run_round(base, tiles, band, run_time, stamps, concurrent, duration, label):
+def run_round(base, tiles, band, run_time, stamps, fixed_ts, concurrent, duration, label):
     """If stamps is None → warm phase (fixed timestamp); else cold (cycling timestamps)."""
     print(f"\n── {label}: workers={concurrent} duration={duration}s tiles={len(tiles)}")
     results, errors, xcache = [], 0, {"HIT": 0, "MISS": 0}
     idx, lock = 0, threading.Lock()
     deadline = time.monotonic() + duration
 
-    def worker():
+    def worker(_=None):
         nonlocal idx, errors
         local, lerr = [], 0
         while time.monotonic() < deadline:
@@ -89,7 +89,7 @@ def run_round(base, tiles, band, run_time, stamps, concurrent, duration, label):
                 i = idx
                 idx += 1
             z, x, y = tiles[i % len(tiles)]
-            ts = stamps[0] if stamps is None else stamps[(i // len(tiles)) % len(stamps)]
+            ts = fixed_ts if stamps is None else stamps[(i // len(tiles)) % len(stamps)]
             status, elapsed, _, xc = http_get(tile_url(base, z, x, y, band, ts, run_time))
             if status == 200:
                 local.append(elapsed)
@@ -101,7 +101,7 @@ def run_round(base, tiles, band, run_time, stamps, concurrent, duration, label):
 
     start = time.monotonic()
     with ThreadPoolExecutor(max_workers=concurrent) as pool:
-        for local, lerr in pool.map(worker, range(concurrent)):
+        for local, lerr in [f.result() for f in [pool.submit(worker) for _ in range(concurrent)]]:
             results.extend(local)
             errors += lerr
     wall = time.monotonic() - start
@@ -151,10 +151,10 @@ def main():
 
     out = []
     if args.phase in ("both", "warm"):
-        out.append(run_round(args.url, tiles, args.band, run_time, None,
+        out.append(run_round(args.url, tiles, args.band, run_time, None, stamps[0],
                               args.concurrent, args.duration, "WARM (cache hits)"))
     if args.phase in ("both", "cold"):
-        out.append(run_round(args.url, tiles, args.band, run_time, stamps,
+        out.append(run_round(args.url, tiles, args.band, run_time, stamps, stamps[0],
                               args.concurrent, args.duration, "COLD (unique timestamps)"))
     print("\nJSON:", json.dumps(out))
 

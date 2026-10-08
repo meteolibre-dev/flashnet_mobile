@@ -68,6 +68,19 @@ var (
 // Index 0 is transparent (no rain).
 var RadarLUT [256][4]byte
 
+// dbzColorLUT maps quantized dBZ directly to the final RGBA color, skipping
+// the per-pixel math.Pow/math.Log of the Z-R transform. Built by replicating
+// the original two-pass float32 math at 0.01 dB resolution — a pixel's color
+// can only differ from the exact path when it sits within ~0.01 dB of a
+// palette class boundary (visually imperceptible; see render_diff_test.go).
+const (
+	dbzLutStep  = 0.01                  // dB resolution of the LUT
+	dbzLutScale = 1.0 / dbzLutStep     // dBZ → index multiplier
+	dbzLutMax   = 100.0                 // dBZ upper bound (clamped above)
+)
+
+var dbzColorLUT [][4]byte // index = round(dbz / dbzLutStep)
+
 // viridisLUT and plasmaLUT are the exact matplotlib colormaps (256 entries).
 // Generated from the BIDS/colormap reference data (CC0).
 var viridisLUT [256][3]byte
@@ -97,6 +110,45 @@ func init() {
 			idx = len(radarThresholds) - 1
 		}
 		RadarLUT[i] = [4]byte{RAIN_CLASSES[idx].RGB[0], RAIN_CLASSES[idx].RGB[1], RAIN_CLASSES[idx].RGB[2], 255}
+	}
+
+	// Build dBZ→color LUT (exact replica of the original per-pixel math,
+	// including the float32 intermediate casts, at 0.01 dB granularity).
+	// Entry i represents the bin [i·step−step/2, i·step+step/2), so bin 0
+	// (values in (0, 0.005)) is evaluated at its midpoint — NOT at dbz=0,
+	// whose "no rain" color is handled by the transparent check before the
+	// LUT is ever consulted.
+	dbzColorLUT = make([][4]byte, int(dbzLutMax/dbzLutStep)+1)
+	for i := range dbzColorLUT {
+		dbz := float64(i) * dbzLutStep
+		if i == 0 {
+			dbz = dbzLutStep / 4 // midpoint of (0, 0.005)
+		}
+		logRate := float32(0)
+		if dbz > 0 {
+			z := float32(math.Pow(10.0, dbz/10.0))
+			rainRate := float32(math.Pow(float64(z)/200.0, 1.0/1.6))
+			if rainRate < 0.01 {
+				rainRate = 0.01
+			}
+			if rainRate > float32(radarMaxRate) {
+				rainRate = float32(radarMaxRate)
+			}
+			logRate = float32(math.Log(float64(rainRate)))
+		}
+		// Normalize using logarithmic mapping (same as old render loop)
+		dataNorm := (logRate - float32(radarLogMin)) / float32(radarLogMax-radarLogMin)
+		if dataNorm < 0 {
+			dataNorm = 0
+		}
+		if dataNorm > 1 {
+			dataNorm = 1
+		}
+		idx := int(dataNorm * 255)
+		if idx < 1 {
+			idx = 0 // index 0 = transparent
+		}
+		dbzColorLUT[i] = RadarLUT[idx]
 	}
 
 	// Build colormap LUTs for each band
