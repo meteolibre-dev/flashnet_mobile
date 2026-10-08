@@ -312,7 +312,7 @@ func handleTilePNG(w http.ResponseWriter, r *http.Request) {
 	url := res.URL
 
 	// Retry logic for transient GCS/network errors
-	var rgba *[256 * 256 * 4]byte
+	var tb *tileBuffers
 	maxRetries := 3
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
@@ -334,26 +334,26 @@ func handleTilePNG(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		rgba = generateTileRGBA(data, band, nodata, 256)
+		tb = renderTile(data, band, nodata, 256)
 		break
 	}
 
 	var pngBytes []byte
-	if rgba == nil {
+	if tb == nil {
 		pngBytes = encodeEmptyPNG(256)
 	} else {
-		pngBytes, _ = encodePNG(rgba[:256*256*4], 256, 256)
+		pngBytes, _ = encodePNG(tb.rgba[:256*256*4], 256, 256)
+
+		// Compute ETag from rendered pixels (before recycling the buffers)
+		hash := md5.Sum(tb.rgba[:256*256*4])
+		etag := hex.EncodeToString(hash[:])
+		w.Header().Set("ETag", fmt.Sprintf(`"%s"`, etag))
+
+		releaseTileBuffers(tb)
 	}
 
 	// Cache it
 	tileCache.Put(cacheKey, pngBytes)
-
-		// Compute ETag (only for non-empty tiles)
-	if rgba != nil {
-		hash := md5.Sum(rgba[:256*256*4])
-		etag := hex.EncodeToString(hash[:])
-		w.Header().Set("ETag", fmt.Sprintf(`"%s"`, etag))
-	}
 
 	setCacheHeaders(w, 300)
 	w.Header().Set("X-Cache", "MISS")
