@@ -68,7 +68,7 @@ func BenchmarkRenderLightning(b *testing.B) {
 }
 
 func BenchmarkRenderSatellite(b *testing.B) {
-	// sat_ch1: plasma colormap, generic LUT path
+	// sat_ch1: enhanced-IR colormap, generic LUT path
 	data := makeBenchTile(benchTileSize*benchTileSize, 3, 3, 120, 0.25, 0.30)
 	var nd float64 = -9999
 	b.ReportAllocs()

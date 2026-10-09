@@ -6,18 +6,25 @@ package main
 
 import (
 	"os"
+	"strconv"
+	"strings"
 	"time"
 )
 
 // BandConfig describes how to render a single forecast band/channel.
 type BandConfig struct {
-	Name      string  `json:"name"`
-	Min       float64 `json:"min"`
-	Max       float64 `json:"max"`
-	Colormap  string  `json:"colormap"`  // "custom" for lightning, "viridis", "plasma", etc.
-	Invert    bool    `json:"invert"`
-	DType     string  `json:"dtype"`
-	colormap  *[256][4]byte // pre-computed 256-entry RGBA LUT (nil for custom/radar)
+	Name     string  `json:"name"`
+	Min      float64 `json:"min"`
+	Max      float64 `json:"max"`
+	Colormap string  `json:"colormap"`  // "custom" for lightning, "viridis", "plasma", "greyscale", "ir_enhanced", etc.
+	Invert   bool    `json:"invert"`
+	DType    string  `json:"dtype"`
+
+	// SplitValue: for two-segment colormaps (ir_enhanced): the data value
+	// separating the warm (greyscale) and cold (spectral) segments.
+	SplitValue float64 `json:"-"`
+
+	colormap *[256][4]byte // pre-computed 256-entry RGBA LUT (nil for custom/radar)
 }
 
 // Region bounds for point queries (matches frontend REGION)
@@ -46,15 +53,25 @@ var BANDS = map[string]*BandConfig{
 		Name:     "Satellite Channel 0 (VIS)",
 		Min:      0,
 		Max:      12,
-		Colormap: "viridis",
-		Invert:   false,
+		// Same colorbar as global-server-go's VIS channel: greyscale with
+		// high reflectance (bright clouds) rendered white (Invert flips the
+		// white→black base LUT).
+		Colormap: "greyscale",
+		Invert:   true, // high reflectance (bright clouds) → white
 	},
 	"sat_ch1": {
-		Name:     "Satellite Channel 1 (IR)",
-		Min:      3,
-		Max:      120,
-		Colormap: "plasma",
-		Invert:   true, // Inverted for IR (cold = bright)
+		Name: "Satellite Channel 1 (IR)",
+		Min:  3,
+		Max:  120,
+		// Same enhanced-IR colorbar as global-server-go's IR channel
+		// (spectral → greys, two-segment stretch — see buildIREnhancedLUT):
+		// warm surfaces/light cloud on the greyscale ramp, cold cloud tops
+		// on the spectral ramp (red → black at the coldest).
+		Colormap: "ir_enhanced",
+		Invert:   false, // LUT is built in data orientation (see palette.go)
+		// 77 splits [3, 120] at the same fraction as the global model's
+		// 150 over [10, 230]. Tune with BAND_SAT_CH1_SPLIT if needed.
+		SplitValue: 77, // greys ≤ 77 ≤ spectral (cold tops)
 	},
 	"sat_ch2": {
 		Name:     "Satellite Channel 2",
@@ -107,6 +124,39 @@ var (
 	// COG dataset pool (keep GDAL datasets open for reuse)
 	COGPoolMaxSize = atoiOr(envOr("COG_POOL_MAX_SIZE", "50"), 50)
 )
+
+func init() {
+	// Allow per-band overrides via env, e.g. BAND_SAT_CH1_MIN /
+	// BAND_SAT_CH1_MAX (also _COLORMAP / _INVERT / _SPLIT — the latter for
+	// the two-segment ir_enhanced colormap). Useful to tune rendering
+	// without rebuilding the image. Must run before palette.go's init()
+	// builds the LUTs (files initialize alphabetically: config < palette).
+	for name, cfg := range BANDS {
+		envPrefix := "BAND_" + strings.ToUpper(name)
+		if v := os.Getenv(envPrefix + "_MIN"); v != "" {
+			if f, err := strconv.ParseFloat(v, 64); err == nil {
+				cfg.Min = f
+			}
+		}
+		if v := os.Getenv(envPrefix + "_MAX"); v != "" {
+			if f, err := strconv.ParseFloat(v, 64); err == nil {
+				cfg.Max = f
+			}
+		}
+		if v := os.Getenv(envPrefix + "_SPLIT"); v != "" {
+			if f, err := strconv.ParseFloat(v, 64); err == nil {
+				cfg.SplitValue = f
+			}
+		}
+		if v := os.Getenv(envPrefix + "_COLORMAP"); v != "" {
+			cfg.Colormap = v
+		}
+		if v := os.Getenv(envPrefix + "_INVERT"); v != "" {
+			b, err := strconv.ParseBool(v)
+			cfg.Invert = err == nil && b
+		}
+	}
+}
 
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {

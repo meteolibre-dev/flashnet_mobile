@@ -105,6 +105,10 @@ All configuration via environment variables:
 | `GCP_CREDENTIALS_B64` | — | Base64-encoded service account JSON |
 | `GCP_CREDENTIALS` | — | Raw service account JSON |
 | `GOOGLE_APPLICATION_CREDENTIALS` | — | Path to credentials file |
+| `BAND_<NAME>_MIN` / `_MAX` | band default | Per-band render range override (e.g. `BAND_SAT_CH1_MAX`) |
+| `BAND_<NAME>_COLORMAP` | band default | Per-band colormap override (`viridis`, `plasma`, `greyscale`, `ir_enhanced`) |
+| `BAND_<NAME>_INVERT` | band default | Per-band invert override (`true`/`false`) |
+| `BAND_<NAME>_SPLIT` | band default | Warm/cold split for `ir_enhanced` (e.g. `BAND_SAT_CH1_SPLIT=77`) |
 
 ## API Endpoints
 
@@ -159,8 +163,8 @@ lightning-server-go/
 |---|---|---|---|
 | `lightning` | Custom (yellow→red) | 0–4 | Discrete scale |
 | `radar` | Radar 35-class | 0–130 mm/h | Z-R transform + log palette |
-| `sat_ch0` | viridis | 0–12 | Satellite visible |
-| `sat_ch1` | plasma (inverted) | 3–120 | Satellite IR |
+| `sat_ch0` | greyscale (inverted) | 0–12 | Satellite visible — same colorbar as global server (bright clouds → white) |
+| `sat_ch1` | enhanced IR (spectral→greys) | 3–120 | Satellite IR — same colorbar as global server (two-segment stretch, split 77) |
 | `sat_ch2` | plasma (inverted) | -3–120 | Satellite channel 2 |
 
 ## License
