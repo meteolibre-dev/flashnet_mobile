@@ -64,14 +64,20 @@ var BANDS = map[string]*BandConfig{
 		Min:  3,
 		Max:  120,
 		// Same enhanced-IR colorbar as global-server-go's IR channel
-		// (spectral → greys, two-segment stretch — see buildIREnhancedLUT):
-		// warm surfaces/light cloud on the greyscale ramp, cold cloud tops
-		// on the spectral ramp (red → black at the coldest).
+		// (spectral → greys, two-segment stretch — see buildIREnhancedLUT),
+		// but mirrored: unlike the global model's GMGSI counts (high = cold
+		// cloud top), this channel is brightness-temperature-like (low = cold
+		// cloud top, high = warm surface), so Invert=true flips the palette:
+		// cold tops on the spectral ramp (black → red at the coldest), warm
+		// surfaces/light cloud on the greyscale ramp.
 		Colormap: "ir_enhanced",
-		Invert:   false, // LUT is built in data orientation (see palette.go)
-		// 77 splits [3, 120] at the same fraction as the global model's
-		// 150 over [10, 230]. Tune with BAND_SAT_CH1_SPLIT if needed.
-		SplitValue: 77, // greys ≤ 77 ≤ spectral (cold tops)
+		Invert:   true, // regional IR: low value = cold — mirror the palette
+		// With Invert=true the effective greys↔spectral boundary lands at
+		// min+max−split = 46, i.e. the cold spectral segment covers the
+		// lowest ~37% of the range — mirroring the global model's
+		// proportions (150 over [10, 230]). Tune with BAND_SAT_CH1_SPLIT
+		// if needed.
+		SplitValue: 77, // spectral (cold tops) ≤ 46 ≤ greys (after inversion)
 	},
 	"sat_ch2": {
 		Name:     "Satellite Channel 2",

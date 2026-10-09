@@ -19,7 +19,7 @@ A raster tile server for weather forecasting over **Europe**. It serves pre-rend
 | `lightning` | Lightning probability | 0–4 | Yellow → red (discrete) |
 | `radar` | Rain rate | 0–130 mm/h | Radar 35-class (log) |
 | `sat_ch0` | Satellite visible | 0–12 | greyscale (inverted — bright clouds white) |
-| `sat_ch1` | Satellite IR | 3–120 | enhanced IR (spectral→greys, split 77) |
+| `sat_ch1` | Satellite IR | 3–120 | enhanced IR (inverted: low = cold; spectral ≤ 46 ≤ greys) |
 | `sat_ch2` | Satellite channel 2 | -3–120 | plasma (inverted) |
 
 ---
