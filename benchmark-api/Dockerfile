@@ -12,6 +12,8 @@ WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+# eMudhra CA compromise (Oct 2026): refresh trust store
+RUN pip install --no-cache-dir -U certifi
 
 COPY . .
 
