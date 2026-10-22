@@ -32,7 +32,10 @@ def _init_gcs_credentials():
 
     creds_b64 = os.getenv("GCP_CREDENTIALS_B64")
     if not creds_b64:
-        logger.info("No GCP_CREDENTIALS_B64 env var — relying on default credentials")
+        # GDAL/rasterio cannot use the Cloud Run metadata token directly; the
+        # source bucket is publicly readable, so use unsigned /vsigs/ requests.
+        os.environ.setdefault("GS_NO_SIGNREQUEST", "YES")
+        logger.info("No GCP_CREDENTIALS_B64 env var — using unsigned GCS access (public bucket)")
         return None
 
     try:

@@ -586,15 +586,11 @@ func setupGDALGCSAuth() {
 		return
 	}
 
-	// Option 3: Try metadata server (Workload Identity)
-	token, ok := getMetadataToken()
-	if ok {
-		os.Setenv("GS_ACCESS_TOKEN", token)
-		log.Println("[INIT] Set GS_ACCESS_TOKEN from metadata server")
-		return
-	}
-
-	log.Println("[INIT] No explicit credentials found — relying on ADC/default")
+	// Option 3: Metadata server — a raw metadata token is NOT usable by GDAL
+	// (/vsigs/ ignores GS_ACCESS_TOKEN and cannot auto-refresh it). The bucket
+	// is publicly readable, so use unsigned requests instead.
+	os.Setenv("GS_NO_SIGNREQUEST", "YES")
+	log.Println("[INIT] Using unsigned /vsigs/ access (public bucket)")
 }
 
 func setupFromCredsJSON(credsJSON []byte) {

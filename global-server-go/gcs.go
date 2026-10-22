@@ -714,18 +714,14 @@ func setupGDALGCSAuth() {
 		return
 	}
 
-	// Option 3: Try metadata server (Workload Identity)
-	token, ok := getMetadataToken()
-	if ok {
-		os.Setenv("GS_ACCESS_TOKEN", token)
-		log.Println("[INIT] Set GS_ACCESS_TOKEN from metadata server")
-		return
-	}
+	// Option 3: Metadata server — a raw metadata token is NOT usable by GDAL
+	// (no auto-refresh, and /vsigs/ does not read GS_ACCESS_TOKEN), so skip it
+	// and fall through to anonymous access.
 
 	// No credentials anywhere — fall back to anonymous /vsicurl/ access.
 	// Works for buckets with public (allUsers) read access.
 	gdalUseVSICurl = true
-	log.Println("[INIT] No GCS credentials found — using anonymous /vsicurl/ access (public bucket)")
+	log.Println("[INIT] No GDAL-usable credentials — using anonymous /vsicurl/ access (public bucket)")
 }
 
 func setupFromCredsJSON(credsJSON []byte) {
