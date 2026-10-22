@@ -589,7 +589,7 @@ func setupGDALGCSAuth() {
 	// Option 3: Metadata server — a raw metadata token is NOT usable by GDAL
 	// (/vsigs/ ignores GS_ACCESS_TOKEN and cannot auto-refresh it). The bucket
 	// is publicly readable, so use unsigned requests instead.
-	os.Setenv("GS_NO_SIGNREQUEST", "YES")
+	os.Setenv("GS_NO_SIGN_REQUEST", "YES")
 	log.Println("[INIT] Using unsigned /vsigs/ access (public bucket)")
 }
 
