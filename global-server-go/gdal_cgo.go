@@ -271,5 +271,3 @@ func (b *GdalBand) ReadPoint(col, row int) (float32, error) {
 	err := b.ReadWindowInto(buf, col, row, 1, 1, 1, 1)
 	return buf[0], err
 }
-
-
