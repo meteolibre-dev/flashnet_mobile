@@ -37,7 +37,8 @@ jobs:
         id: auth
         uses: 'google-github-actions/auth@v2'
         with:
-          credentials_json: '${{ secrets.GCP_CREDENTIALS }}'
+          workload_identity_provider: 'projects/935480850831/locations/global/workloadIdentityPools/github-pool/providers/github-oidc'
+          service_account: 'github-action@meteoforecast.iam.gserviceaccount.com'
 
       - name: 'Set up Cloud SDK'
         uses: 'google-github-actions/setup-gcloud@v2'
