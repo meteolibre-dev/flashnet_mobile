@@ -714,14 +714,34 @@ func setupGDALGCSAuth() {
 		return
 	}
 
-	// Option 3: Metadata server — a raw metadata token is NOT usable by GDAL
-	// (no auto-refresh, and /vsigs/ does not read GS_ACCESS_TOKEN), so skip it
-	// and fall through to anonymous access.
+	// Option 3: Metadata server (Workload Identity). GDAL cannot consume the
+	// raw token via env vars (GS_ACCESS_TOKEN is ignored by /vsigs/), so push
+	// it through CPLSetConfigOption and refresh it periodically — metadata
+	// tokens expire after ~1h.
+	token, ok := getMetadataToken()
+	if ok {
+		SetGDALAccessToken(token)
+		go gdalTokenRefresher()
+		log.Println("[INIT] GDAL auth via metadata-server token (auto-refreshed)")
+		return
+	}
 
 	// No credentials anywhere — fall back to anonymous /vsicurl/ access.
 	// Works for buckets with public (allUsers) read access.
 	gdalUseVSICurl = true
-	log.Println("[INIT] No GDAL-usable credentials — using anonymous /vsicurl/ access (public bucket)")
+	log.Println("[INIT] No GCS credentials found — using anonymous /vsicurl/ access (public bucket)")
+}
+
+// gdalTokenRefresher re-fetches the metadata-server token before expiry
+// (~60 min lifetime) and pushes it into GDAL.
+func gdalTokenRefresher() {
+	for {
+		time.Sleep(45 * time.Minute)
+		if token, ok := getMetadataToken(); ok {
+			SetGDALAccessToken(token)
+			log.Println("[INIT] Refreshed GDAL GCS access token")
+		}
+	}
 }
 
 func setupFromCredsJSON(credsJSON []byte) {

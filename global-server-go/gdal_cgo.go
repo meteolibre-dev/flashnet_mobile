@@ -271,3 +271,12 @@ func (b *GdalBand) ReadPoint(col, row int) (float32, error) {
 	err := b.ReadWindowInto(buf, col, row, 1, 1, 1, 1)
 	return buf[0], err
 }
+
+// SetGDALAccessToken updates the /vsigs/ bearer token at runtime via
+// CPLSetConfigOption. Used with metadata-server tokens, which expire after
+// ~1h and therefore need periodic refresh.
+func SetGDALAccessToken(token string) {
+	t := C.CString(token)
+	defer C.free(unsafe.Pointer(t))
+	C.CPLSetConfigOption(C.CString("GS_OAUTH2_ACCESS_TOKEN"), t)
+}
