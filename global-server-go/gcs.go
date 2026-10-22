@@ -714,34 +714,13 @@ func setupGDALGCSAuth() {
 		return
 	}
 
-	// Option 3: Metadata server (Workload Identity). GDAL cannot consume the
-	// raw token via env vars (GS_ACCESS_TOKEN is ignored by /vsigs/), so push
-	// it through CPLSetConfigOption and refresh it periodically — metadata
-	// tokens expire after ~1h.
-	token, ok := getMetadataToken()
-	if ok {
-		SetGDALAccessToken(token)
-		go gdalTokenRefresher()
-		log.Println("[INIT] GDAL auth via metadata-server token (auto-refreshed)")
-		return
-	}
-
-	// No credentials anywhere — fall back to anonymous /vsicurl/ access.
-	// Works for buckets with public (allUsers) read access.
-	gdalUseVSICurl = true
-	log.Println("[INIT] No GCS credentials found — using anonymous /vsicurl/ access (public bucket)")
-}
-
-// gdalTokenRefresher re-fetches the metadata-server token before expiry
-// (~60 min lifetime) and pushes it into GDAL.
-func gdalTokenRefresher() {
-	for {
-		time.Sleep(45 * time.Minute)
-		if token, ok := getMetadataToken(); ok {
-			SetGDALAccessToken(token)
-			log.Println("[INIT] Refreshed GDAL GCS access token")
-		}
-	}
+	// Option 3: Running on GCP (Cloud Run). GDAL's /vsigs/ has a built-in
+	// metadata-server auth path, but its container auto-detection fails
+	// (/sys/class/dmi/id/product_name does not exist) — force it with
+	// CPL_MACHINE_IS_GCE. GDAL then fetches and refreshes tokens itself.
+	// The Go GCS client already uses ADC independently.
+	os.Setenv("CPL_MACHINE_IS_GCE", "YES")
+	log.Println("[INIT] Enabled GDAL metadata-server auth (CPL_MACHINE_IS_GCE)")
 }
 
 func setupFromCredsJSON(credsJSON []byte) {
