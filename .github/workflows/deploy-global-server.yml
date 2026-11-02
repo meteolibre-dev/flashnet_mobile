@@ -67,6 +67,7 @@ jobs:
             --allow-unauthenticated \
             --memory 2Gi \
             --cpu 2 \
-            --min-instances 1 \
+            --cpu-throttling \
+            --min-instances 0 \
             --max-instances 4 \
             --set-env-vars BUCKET_BASE_URL=gs://inference_result_flashedges_forecast/forecasts,GOMAXPROCS=2

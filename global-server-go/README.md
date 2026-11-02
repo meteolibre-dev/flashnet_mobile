@@ -167,7 +167,7 @@ forecast behind them:
 CI/CD: [.github/workflows/deploy-global-server.yml](../.github/workflows/deploy-global-server.yml)
 builds the Docker image (multi-stage, GDAL via cgo), pushes it to Artifact
 Registry (`europe-west3/flashnet-repo`) and deploys to **Cloud Run** as
-`global-server-go` (2 Gi / 2 CPU, 1–4 instances, unauthenticated ingress).
+`global-server-go` (2 Gi / 2 CPU, 0–4 instances, unauthenticated ingress).
 
 ## License
 

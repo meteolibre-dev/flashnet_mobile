@@ -167,6 +167,33 @@ lightning-server-go/
 | `sat_ch1` | enhanced IR (spectral→greys, inverted) | 3–120 | Satellite IR — same colorbar as global server, mirrored (low = cold tops, warm surface = dark grey) |
 | `sat_ch2` | plasma (inverted) | -3–120 | Satellite channel 2 |
 
+## Roadmap: In-RAM Active COG Preloading (Cold-Tile Acceleration)
+
+From `PERF.md`, CPU rendering + PNG encoding takes only **~6.1 ms/tile**, while cold tile misses take **~275 ms p50 / ~900 ms p99** because ~97% of cold-miss latency is GCS `/vsigs/` network range reads and per-dataset GDAL mutex serialization.
+
+### Why store active COGs in RAM instead of switching to Zarr?
+
+- **Data size fits easily in RAM**:
+  - 1 regional COG (`3583 × 2150` Float32, DEFLATE + 4 overviews) is **~5–15 MB** compressed.
+  - 18 forecast timesteps × 5 bands (90 files) ≈ **0.8–1.2 GB**.
+  - Last 1–2 hours of 5-min observed radar (`obs`) ≈ **100–150 MB**.
+- **Expected latency gain (~40× on cold tiles)**:
+  - Reading a 256×256 block from RAM (`/dev/shm` tmpfs or GDAL `/vsimem/`) takes **~0.4 ms** (DEFLATE decompression only, zero network RTT) + **6.1 ms** render/encode = **~6.5 ms total per cold tile** (down from ~275 ms).
+- **No data format migration needed**:
+  - Keeping COG GeoTIFF preserves GDAL's built-in overview pyramid selection and Web Mercator resampling (`GDALRasterIO`) without rewriting the ingest pipeline for 3D Zarr chunks.
+
+### Planned implementation steps
+
+1. **Background RAM sync (`/dev/shm` tmpfs)**:
+   - When `/available` or a background watcher detects a new `run_time` (or new `obs` timestamps in `observations/latest.json`), download the active COGs concurrently from GCS into `/dev/shm/meteolibre_cache/...` (atomic temp-file write + rename) and evict previous runs.
+   - Update `resolveCOG` (`obs.go` / `gcs.go`) to return the local `/dev/shm/...` path whenever the file is present in RAM, falling back transparently to `/vsigs/` while downloading or for historical runs.
+   - Works on a dedicated VM (e.g., 4 vCPU / 8 GB RAM) **or** on Cloud Run Gen2 with `--min-instances=1 --memory=4Gi` (`/dev/shm` is an in-memory `tmpfs`).
+2. **`COGPool` concurrency (`cog.go` / `gdal_cgo.go`)**:
+   - Guard `COGPool.Open(url)` with `singleflight` so concurrent tile requests for a cold timestep do not trigger duplicate `gdalOpen` calls under `gdalGlobalMu`.
+   - Maintain a small pool of `GdalDataset` handles per URL (e.g., 4 handles per COG) instead of 1 handle locked by a single `b.ds.mu`, allowing concurrent tile reads for the same timestep to run in parallel across cores.
+3. **Immutable `Cache-Control` headers (`handlers.go`)**:
+   - Increase `Cache-Control` from `max-age=300` (5 min) to `public, max-age=86400, immutable` when `run_time` is specified or `Source == "obs"`, preventing Cloud CDN (`tiles.meteolibre.dev`) and clients from evicting immutable tiles mid-session.
+
 ## License
 
 ISC
