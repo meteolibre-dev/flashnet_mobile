@@ -164,7 +164,7 @@ lightning-server-go/
 | `lightning` | Custom (yellow→red) | 0–4 | Discrete scale |
 | `radar` | Radar 35-class | 0–130 mm/h | Z-R transform + log palette |
 | `sat_ch0` | greyscale (inverted) | 0–12 | Satellite visible — same colorbar as global server (bright clouds → white) |
-| `sat_ch1` | enhanced IR (spectral→greys, inverted) | 3–120 | Satellite IR — same colorbar as global server, mirrored (low = cold tops, warm surface = dark grey) |
+| `sat_ch1` | enhanced IR (greys→green→red→dark red→black/white→pink, inverted) | 3–120 | Satellite IR — warm surface/clouds in greyscale, cold convective tops through green/yellow/orange/red/dark red/black/grey/white/pink (low = cold tops) |
 | `sat_ch2` | plasma (inverted) | -3–120 | Satellite channel 2 |
 
 ## Roadmap: In-RAM Active COG Preloading (Cold-Tile Acceleration)

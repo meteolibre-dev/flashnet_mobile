@@ -84,7 +84,7 @@ var dbzColorLUT [][4]byte // index = round(dbz / dbzLutStep)
 // viridisLUT and plasmaLUT are the exact matplotlib colormaps (256 entries).
 // Generated from the BIDS/colormap reference data (CC0).
 //
-// irEnhancedLUT is the satellite enhanced-IR palette (spectral → greys),
+// irEnhancedLUT is the satellite enhanced-IR palette (convective color ramp → greys),
 // filled in by colormap_data.go's init().
 var viridisLUT [256][3]byte
 var plasmaLUT [256][3]byte
@@ -195,30 +195,28 @@ func buildRGBAFromRGB(src *[256][3]byte, invert bool) [256][4]byte {
 	return lut
 }
 
-// Segment lengths inside irEnhancedLUT (spectral = cold end incl. black,
-// greys = warm end). The palette's own spectral↔greys transition falls at
-// src index ~163.
+// Segment lengths inside irEnhancedLUT (convective color ramp = cold end incl.
+// pink overshooting cores, greys = warm end). The palette's own transition
+// falls at src index ~163.
 const (
-	irSpectralLen = 163 // src[0..162]:   black → dark red → … → navy
+	irSpectralLen = 163 // src[0..162]:   pink → white → grey → black → dark red → red → green → cyan-blue
 	irGreysLen    = 93  // src[163..255]: light grey → dark grey
 )
 
 // buildIREnhancedLUT composes the enhanced-IR palette over a data range in
-// two segments, mirroring trollimage's
-//
-//	spectral.set_range(cold…) + greys.set_range(warm…)
-//
-// example (https://trollimage.readthedocs.io/en/latest/colormap.html):
+// two segments (similar to trollimage's spectral.set_range + greys.set_range
+// two-segment stretch):
 //
 //   - [min, split]  (warm: surfaces, light cloud) → greyscale ramp:
 //     darkest grey at min → lightest grey at split
-//   - (split, max]  (cold: cloud tops) → spectral ramp:
-//     navy at split → red → black at max
+//   - (split, max]  (cold: cloud tops) → convective color ramp:
+//     cyan-blue at split → green → yellow → orange → red → dark red → black →
+//     grey → white → pink at max
 //
 // A single linear stretch cannot do this: the palette's greys segment covers
 // only ~36% of its length, so it must be stretched over the warm data range
-// and the spectral segment compressed over the cold range, or mid-range
-// values (oceans) would land in the navy transition zone.
+// and the cold convective segment compressed over the cold range, or mid-range
+// values (oceans) would land in the blue transition zone.
 func buildIREnhancedLUT(min, max, split float64, invert bool) [256][4]byte {
 	// sane fallbacks
 	if max <= min {

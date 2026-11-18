@@ -63,21 +63,20 @@ var BANDS = map[string]*BandConfig{
 		Name: "Satellite Channel 1 (IR)",
 		Min:  3,
 		Max:  120,
-		// Same enhanced-IR colorbar as global-server-go's IR channel
-		// (spectral → greys, two-segment stretch — see buildIREnhancedLUT),
-		// but mirrored: unlike the global model's GMGSI counts (high = cold
-		// cloud top), this channel is brightness-temperature-like (low = cold
-		// cloud top, high = warm surface), so Invert=true flips the palette:
-		// cold tops on the spectral ramp (black → red at the coldest), warm
+		// Enhanced-IR colorbar with two-segment stretch (warm greyscale → cold
+		// convective ramp, see buildIREnhancedLUT). Unlike the global model's
+		// GMGSI counts (high = cold cloud top), this channel is brightness-
+		// temperature-like (low = cold cloud top, high = warm surface), so
+		// Invert=true flips the palette: cold tops on the convective ramp
+		// (cyan-blue → green → yellow → orange → red → dark red → black →
+		// grey → white → pink at the coldest overshooting cores), warm
 		// surfaces/light cloud on the greyscale ramp.
 		Colormap: "ir_enhanced",
 		Invert:   true, // regional IR: low value = cold — mirror the palette
-		// With Invert=true the effective greys↔spectral boundary lands at
-		// min+max−split = 46, i.e. the cold spectral segment covers the
-		// lowest ~37% of the range — mirroring the global model's
-		// proportions (150 over [10, 230]). Tune with BAND_SAT_CH1_SPLIT
-		// if needed.
-		SplitValue: 77, // spectral (cold tops) ≤ 46 ≤ greys (after inversion)
+		// With Invert=true the effective greys↔convective boundary lands at
+		// min+max−split = 46, i.e. the cold convective segment covers the
+		// lowest ~37% of the range. Tune with BAND_SAT_CH1_SPLIT if needed.
+		SplitValue: 77, // convective (cold tops) ≤ 46 ≤ greys (after inversion)
 	},
 	"sat_ch2": {
 		Name:     "Satellite Channel 2",
